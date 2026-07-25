@@ -1,0 +1,81 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "botas"
+version = "0.1.0"
+description = "BOTAS: Bacterial Operon-aware Transcriptome Alignment System"
+readme = "README.md"
+license = { text = "MIT" }
+
+authors = [
+  { name = "Clabe Wekesa", email = "simiyu86wekesa@gmail.com" }
+]
+
+requires-python = ">=3.10"
+
+keywords = [
+  "RNA-seq",
+  "bacterial transcriptomics",
+  "operons",
+  "sequence alignment",
+  "bioinformatics",
+  "circular genomes"
+]
+
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: POSIX :: Linux",
+  "Topic :: Scientific/Engineering :: Bio-Informatics",
+  "Intended Audience :: Science/Research",
+  "Development Status :: 4 - Beta"
+]
+
+dependencies = [
+  "pysam>=0.22",
+  "edlib>=1.3.9",
+  "biopython>=1.81"
+]
+
+[project.optional-dependencies]
+progress = [
+  "tqdm>=4.66"
+]
+
+dev = [
+  "pytest>=7.4",
+  "pytest-cov",
+  "black",
+  "ruff",
+  "mypy"
+]
+
+[project.urls]
+Homepage = "https://github.com/cwekesa/botas"
+Repository = "https://github.com/cwekesa/botas"
+Issues = "https://github.com/cwekesa/botas/issues"
+Documentation = "https://github.com/cwekesa/botas#readme"
+
+[project.scripts]
+botas = "botas.cli.align:main"
+
+# --------------------------------------------------
+# Package discovery
+# --------------------------------------------------
+[tool.setuptools]
+packages = ["botas"]
+
+# --------------------------------------------------
+# Pytest configuration
+# --------------------------------------------------
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_functions = ["test_*"]
+addopts = "--import-mode=append"
+
