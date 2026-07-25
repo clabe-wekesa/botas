@@ -1,19 +1,23 @@
 [build-system]
-requires = ["setuptools>=61.0"]
+requires = [
+  "setuptools>=77",
+  "wheel"
+]
 build-backend = "setuptools.build_meta"
+
 
 [project]
 name = "botas"
 version = "0.1.0"
 description = "BOTAS: Bacterial Operon-aware Transcriptome Alignment System"
 readme = "README.md"
-license = { text = "MIT" }
+requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE"]
 
 authors = [
   { name = "Clabe Wekesa", email = "simiyu86wekesa@gmail.com" }
 ]
-
-requires-python = ">=3.10"
 
 keywords = [
   "RNA-seq",
@@ -25,15 +29,15 @@ keywords = [
 ]
 
 classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Science/Research",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: POSIX :: Linux",
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3.10",
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
-  "License :: OSI Approved :: MIT License",
-  "Operating System :: POSIX :: Linux",
-  "Topic :: Scientific/Engineering :: Bio-Informatics",
-  "Intended Audience :: Science/Research",
-  "Development Status :: 4 - Beta"
+  "Topic :: Scientific/Engineering :: Bio-Informatics"
 ]
 
 dependencies = [
@@ -42,33 +46,69 @@ dependencies = [
   "biopython>=1.81"
 ]
 
+
 [project.optional-dependencies]
 progress = [
   "tqdm>=4.66"
 ]
 
 dev = [
+  "Cython>=3.0",
   "pytest>=7.4",
-  "pytest-cov",
-  "black",
-  "ruff",
-  "mypy"
+  "pytest-cov>=4.1",
+  "black>=24.0",
+  "ruff>=0.5",
+  "mypy>=1.8",
+  "build>=1.2",
+  "twine>=5.0"
 ]
 
+
 [project.urls]
-Homepage = "https://github.com/cwekesa/botas"
-Repository = "https://github.com/cwekesa/botas"
-Issues = "https://github.com/cwekesa/botas/issues"
-Documentation = "https://github.com/cwekesa/botas#readme"
+Homepage = "https://github.com/clabe-wekesa/botas"
+Repository = "https://github.com/clabe-wekesa/botas"
+Issues = "https://github.com/clabe-wekesa/botas/issues"
+Documentation = "https://github.com/clabe-wekesa/botas#readme"
+
 
 [project.scripts]
 botas = "botas.cli.align:main"
 
+
 # --------------------------------------------------
-# Package discovery
+# Setuptools configuration
 # --------------------------------------------------
 [tool.setuptools]
-packages = ["botas"]
+include-package-data = true
+
+ext-modules = [
+  {
+    name = "botas.quantify._core_fast",
+    sources = ["botas/quantify/_core_fast.c"],
+    optional = true
+  }
+]
+
+
+# --------------------------------------------------
+# Automatic package discovery
+# --------------------------------------------------
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["botas*"]
+
+
+# --------------------------------------------------
+# Runtime package data
+# --------------------------------------------------
+[tool.setuptools.package-data]
+"botas.data" = [
+  "*.fa",
+  "*.fasta",
+  "*.fa.gz",
+  "*.fasta.gz"
+]
+
 
 # --------------------------------------------------
 # Pytest configuration
@@ -78,4 +118,3 @@ testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_functions = ["test_*"]
 addopts = "--import-mode=append"
-
