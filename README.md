@@ -90,7 +90,7 @@ botas align \
 ### Gene quantification
 
 ```bash
-botas quant \
+botas quantify \
     -b aligned.bam \
     -g genes.gff \
     -o gene_counts.tsv

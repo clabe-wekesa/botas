@@ -27,7 +27,6 @@ from botas.quantify.cli import QUANTIFY_EPILOG
 from botas.rrna.rrna import load_rrna_kmers, is_rrna_like
 from botas.rrna.db import get_default_rrna_db
 from botas.core.utils import normalize_read_name  # FIX: use fast name splitter
-from botas.rrna.db import get_default_rrna_db
 from botas.core.botas_index import build_botas_index, save_botas_index, default_index_path, BOTAS_INDEX_SUFFIX
 from botas.core.botas_index import load_botas_index, BotasIntIndexAdapter
 from botas.core.pe_pool import _normalize_circular_hit
@@ -65,7 +64,7 @@ Notes
 
 def get_botas_version() -> str:
     try:
-        return version("botas")
+        return version("botas-rnaseq")
     except PackageNotFoundError:
         return "unknown"
 
@@ -285,7 +284,7 @@ def build_root_parser() -> argparse.ArgumentParser:
         ),
     )
 
-    p.add_argument("--version", action="store_true", help="Print version and exit.")
+    p.add_argument("--version", action="version", version=f"BOTAS v{get_botas_version()}", help="Print version and exit.")
 
     sub = p.add_subparsers(dest="command", metavar="<command>", required=True)
 
@@ -837,10 +836,6 @@ def main(argv: list[str] | None = None) -> int:
             "resultsdir": args._resultsdir,
         },
     )
-
-    if getattr(args, "version", False):
-        print(f"BOTAS v{get_botas_version()}")
-        return 0
 
     if args.command is None:
         sys.stderr.write("[botas] ERROR: no command specified\n")
