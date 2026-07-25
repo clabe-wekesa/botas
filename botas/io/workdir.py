@@ -22,9 +22,17 @@ def _auto_name() -> str:
 def init_workdir(workdir: str | None, out: str | None = None) -> WorkDir:
     if workdir:
         root = Path(workdir)
+
     elif out:
         p = Path(out)
-        root = p.parent / f"{p.stem}.botas"
+
+        if p.name.endswith(".botas.idx"):
+            stem = p.name.removesuffix(".botas.idx")
+        else:
+            stem = p.stem
+
+        root = p.parent / f"{stem}.botas"
+
     else:
         root = Path.cwd() / _auto_name()
 
