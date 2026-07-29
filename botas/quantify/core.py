@@ -1,725 +1,729 @@
-# botas/quantify/core.py
 from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
-import bisect
-import logging
-import time
+from typing import Dict, Mapping, Optional
+
 import pysam
 
-try:
-    from botas.quantify._core_fast import quantify_bam_fast
-
-    CYTHON_BACKEND_AVAILABLE = True
-
-except ImportError:
-    quantify_bam_fast = None
-    CYTHON_BACKEND_AVAILABLE = False
-
-from botas.quantify.genes import GeneFeature
-
-
-logger = logging.getLogger(__name__)
+from botas.quantify.fragments import FragmentStats
+from botas.quantify.genes import (
+    GeneFeature,
+    load_gene_features_from_gff,
+)
+from botas.quantify.intervals import (
+    ContigIntervalIndex,
+    build_gene_interval_index,
+    normalized_blocks_gene_overlaps,
+)
 
 
-# ---------------------------------------------------------------------
-# Type aliases
-# ---------------------------------------------------------------------
-
-GeneCounts = Dict[str, float]
-MultiBamCounts = Dict[str, GeneCounts]
-
-# start, end, gene_id, strand
-IndexedInterval = Tuple[int, int, str, str]
-
-
-# ---------------------------------------------------------------------
-# Quantification parameters and statistics
-# ---------------------------------------------------------------------
-
-@dataclass(frozen=True)
-class QuantParams:
+@dataclass(frozen=True, slots=True)
+class QuantificationConfig:
     """
-    Parameters controlling alignment filtering and gene assignment.
-
-    strand_mode
-        0 = unstranded
-        1 = alignment strand must match gene strand
-        2 = alignment strand must be opposite to gene strand
-
-    multi_mode
-        ignore:
-            Discard alignments explicitly marked as multimapping by NH > 1.
-            If NH is absent, treat the alignment as countable.
-
-        unique:
-            Count alignments with NH == 1. If NH is absent, treat the
-            primary alignment as unique.
-
-        fractional:
-            Count alignments with weight 1 / NH. If NH is absent, use 1.
-    """
-
-    strand_mode: int = 0
-    mapq_min: int = 0
-    multi_mode: str = "ignore"
-    use_nh_tag: bool = True
-    log_every: int = 1_000_000
-
-    def __post_init__(self) -> None:
-        if self.strand_mode not in {0, 1, 2}:
-            raise ValueError("strand_mode must be 0, 1, or 2")
-
-        if self.mapq_min < 0:
-            raise ValueError("mapq_min must be >= 0")
-
-        if self.multi_mode not in {"ignore", "unique", "fractional"}:
-            raise ValueError(
-                "multi_mode must be one of: ignore, unique, fractional"
-            )
-
-        if self.log_every < 0:
-            raise ValueError("log_every must be >= 0")
-
-
-@dataclass
-class QuantStats:
-    """
-    Summary statistics for one quantified BAM file.
+    Configuration used for one quantification run.
     """
 
     bam_path: str
-    total_records: int = 0
-    primary_mapped_records: int = 0
-    below_mapq: int = 0
-    multimapping_discarded: int = 0
-    no_annotated_contig: int = 0
+    gff_path: str
+    feature_types: str = "gene"
+    id_attribute: str = "locus_tag"
+    min_overlap_bases: int = 1
+    largest_overlap: bool = False
+
+    def __post_init__(self) -> None:
+        if not self.bam_path:
+            raise ValueError("bam_path cannot be empty")
+
+        if not self.gff_path:
+            raise ValueError("gff_path cannot be empty")
+
+        if not self.feature_types:
+            raise ValueError("feature_types cannot be empty")
+
+        if not self.id_attribute:
+            raise ValueError("id_attribute cannot be empty")
+
+        if self.min_overlap_bases < 1:
+            raise ValueError("min_overlap_bases must be at least 1")
+
+
+@dataclass(frozen=True, slots=True)
+class AssignmentSummary:
+    """
+    Fragment-level assignment categories.
+    """
+
+    assigned: int = 0
+    unmapped: int = 0
     no_feature: int = 0
     ambiguous: int = 0
-    assigned_records: int = 0
-    assigned_weight: float = 0.0
-    elapsed_seconds: float = 0.0
+    insufficient_overlap: int = 0
 
-
-# ---------------------------------------------------------------------
-# Gene interval index
-# ---------------------------------------------------------------------
-
-@dataclass(frozen=True)
-class ContigIntervalIndex:
-    """
-    Interval index for one reference contig.
-
-    intervals
-        Gene intervals sorted by start coordinate.
-
-    starts
-        Start coordinates corresponding to intervals.
-
-    prefix_max_ends
-        prefix_max_ends[i] is the greatest interval end among
-        intervals[0:i+1]. This allows the backward overlap search to stop
-        as soon as no earlier interval can overlap the query.
-    """
-
-    intervals: Tuple[IndexedInterval, ...]
-    starts: Tuple[int, ...]
-    prefix_max_ends: Tuple[int, ...]
-
-
-GeneIntervalIndex = Dict[str, ContigIntervalIndex]
-
-
-def build_gene_interval_index(
-    genes: Mapping[str, GeneFeature],
-) -> GeneIntervalIndex:
-    """
-    Build an interval index from gene features.
-
-    Each block belonging to a gene is inserted separately. Intervals are
-    sorted by genomic start coordinate. Prefix maximum ends permit
-    correct overlap lookup without relying on an arbitrary search window.
-    """
-
-    intervals_by_contig: Dict[str, List[IndexedInterval]] = {}
-
-    for gene_id, feature in genes.items():
-        for start, end in feature.blocks:
-            if end <= start:
-                logger.warning(
-                    "Skipping invalid block for gene %s: [%d, %d)",
-                    gene_id,
-                    start,
-                    end,
-                )
-                continue
-
-            intervals_by_contig.setdefault(feature.contig, []).append(
-                (start, end, gene_id, feature.strand)
-            )
-
-    index: GeneIntervalIndex = {}
-
-    for contig, intervals in intervals_by_contig.items():
-        intervals.sort(key=lambda item: (item[0], item[1], item[2]))
-
-        starts: List[int] = []
-        prefix_max_ends: List[int] = []
-        maximum_end = -1
-
-        for start, end, _gene_id, _strand in intervals:
-            starts.append(start)
-            maximum_end = max(maximum_end, end)
-            prefix_max_ends.append(maximum_end)
-
-        index[contig] = ContigIntervalIndex(
-            intervals=tuple(intervals),
-            starts=tuple(starts),
-            prefix_max_ends=tuple(prefix_max_ends),
+    @property
+    def total_fragments(self) -> int:
+        return (
+            self.assigned
+            + self.unmapped
+            + self.no_feature
+            + self.ambiguous
+            + self.insufficient_overlap
         )
 
-    logger.debug(
-        "Built gene interval index for %d contigs and %d genes",
-        len(index),
-        len(genes),
-    )
-
-    return index
-
-
-# ---------------------------------------------------------------------
-# Alignment filtering and weighting
-# ---------------------------------------------------------------------
-
-def _read_passes_filters(
-    aln: pysam.AlignedSegment,
-    mapq_min: int,
-) -> bool:
-    """
-    Return True for mapped primary alignments meeting the MAPQ threshold.
-    """
-
-    if aln.is_unmapped:
-        return False
-
-    if aln.is_secondary or aln.is_supplementary:
-        return False
-
-    if aln.mapping_quality < mapq_min:
-        return False
-
-    return True
-
-
-def _nh(aln: pysam.AlignedSegment) -> Optional[int]:
-    """
-    Return the NH tag without using exceptions for normally absent tags.
-    """
-
-    if not aln.has_tag("NH"):
-        return None
-
-    value = aln.get_tag("NH")
-
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        logger.debug(
-            "Invalid NH tag for alignment %s: %r",
-            aln.query_name,
-            value,
-        )
-        return None
-
-
-def _read_weight(
-    aln: pysam.AlignedSegment,
-    params: QuantParams,
-) -> float:
-    """
-    Determine the weight contributed by one primary alignment.
-    """
-
-    if not params.use_nh_tag:
-        return 1.0
-
-    nh = _nh(aln)
-
-    if params.multi_mode == "ignore":
-        if nh is not None and nh > 1:
+    @property
+    def assignment_rate(self) -> float:
+        if self.total_fragments == 0:
             return 0.0
-        return 1.0
 
-    if params.multi_mode == "unique":
-        # Some aligners omit NH for primary unique alignments.
-        if nh is None:
-            return 1.0
-        return 1.0 if nh == 1 else 0.0
+        return self.assigned / self.total_fragments
 
-    if params.multi_mode == "fractional":
-        if nh is None or nh <= 1:
-            return 1.0
-        return 1.0 / float(nh)
-
-    # QuantParams validates this before execution.
-    raise ValueError(f"Unknown multi_mode: {params.multi_mode}")
+    def as_dict(self) -> Dict[str, int]:
+        return {
+            "assigned": self.assigned,
+            "unmapped": self.unmapped,
+            "no_feature": self.no_feature,
+            "ambiguous": self.ambiguous,
+            "insufficient_overlap": self.insufficient_overlap,
+        }
 
 
-def _strand_compatible(
-    aln: pysam.AlignedSegment,
-    gene_strand: str,
-    strand_mode: int,
-) -> bool:
+@dataclass(frozen=True, slots=True)
+class QuantificationResult:
     """
-    Test alignment/gene strand compatibility.
+    Complete output of one quantification run.
     """
 
-    if strand_mode == 0:
-        return True
+    gene_counts: Mapping[str, int]
+    genes: Mapping[str, GeneFeature]
+    summary: AssignmentSummary
+    fragment_stats: FragmentStats
+    config: QuantificationConfig
 
-    read_strand = "-" if aln.is_reverse else "+"
+    @property
+    def total_assigned_counts(self) -> int:
+        return sum(self.gene_counts.values())
 
-    if strand_mode == 1:
-        return read_strand == gene_strand
+    def validate(self) -> None:
+        """
+        Check internal consistency of the completed run.
+        """
 
-    if strand_mode == 2:
-        return read_strand != gene_strand
+        if set(self.gene_counts) != set(self.genes):
+            missing_counts = set(self.genes) - set(self.gene_counts)
+            unknown_counts = set(self.gene_counts) - set(self.genes)
 
-    raise ValueError("strand_mode must be 0, 1, or 2")
+            raise ValueError(
+                "Gene count identifiers do not match loaded genes. "
+                f"Missing counts: {sorted(missing_counts)[:5]}; "
+                f"unknown counts: {sorted(unknown_counts)[:5]}"
+            )
 
+        if any(count < 0 for count in self.gene_counts.values()):
+            raise ValueError("Gene counts cannot be negative")
 
-# ---------------------------------------------------------------------
-# Interval querying
-# ---------------------------------------------------------------------
+        if self.total_assigned_counts != self.summary.assigned:
+            raise ValueError(
+                "Sum of gene counts does not match assigned fragments: "
+                f"{self.total_assigned_counts} != "
+                f"{self.summary.assigned}"
+            )
 
-def _genes_overlapping_block(
-    block_start: int,
-    block_end: int,
-    contig_index: ContigIntervalIndex,
-    aln: pysam.AlignedSegment,
-    strand_mode: int,
-    hits: set[str],
-) -> bool:
-    """
-    Add genes overlapping one alignment block to ``hits``.
+        if (
+            self.summary.total_fragments
+            != self.fragment_stats.total_fragments
+        ):
+            raise ValueError(
+                "Assignment summary total does not match fragment total: "
+                f"{self.summary.total_fragments} != "
+                f"{self.fragment_stats.total_fragments}"
+            )
 
-    Returns True as soon as more than one distinct gene has been found,
-    allowing ambiguous alignments to terminate early.
-    """
-
-    if block_end <= block_start:
-        return False
-
-    intervals = contig_index.intervals
-    starts = contig_index.starts
-    prefix_max_ends = contig_index.prefix_max_ends
-
-    # Only intervals beginning before block_end can overlap.
-    position = bisect.bisect_left(starts, block_end) - 1
-
-    while position >= 0:
-        # If the maximum end among this and all previous intervals is not
-        # beyond block_start, no earlier interval can overlap.
-        if prefix_max_ends[position] <= block_start:
-            break
-
-        start, end, gene_id, gene_strand = intervals[position]
-
-        if end > block_start and start < block_end:
-            if _strand_compatible(aln, gene_strand, strand_mode):
-                hits.add(gene_id)
-
-                if len(hits) > 1:
-                    return True
-
-        position -= 1
-
-    return False
+        if (
+            self.summary.unmapped
+            != self.fragment_stats.fully_unmapped_fragments
+        ):
+            raise ValueError(
+                "Unmapped assignment count does not match completely "
+                "unmapped fragments"
+            )
 
 
-def _assign_alignment_to_gene(
-    aln: pysam.AlignedSegment,
-    contig_index: ContigIntervalIndex,
-    strand_mode: int,
-) -> Tuple[Optional[str], bool]:
-    """
-    Assign one alignment to a gene.
+def _validate_input_path(
+    path: str,
+    *,
+    description: str,
+) -> None:
+    input_path = Path(path)
 
-    The CIGAR-derived aligned blocks are checked independently. This
-    avoids treating skipped reference regions as covered by the read.
-
-    Returns
-    -------
-    gene_id
-        Gene ID when exactly one gene is overlapped, otherwise None.
-
-    ambiguous
-        True when more than one distinct gene is overlapped.
-    """
-
-    hits: set[str] = set()
-
-    blocks = aln.get_blocks()
-
-    if not blocks:
-        return None, False
-
-    for block_start, block_end in blocks:
-        ambiguous = _genes_overlapping_block(
-            block_start=block_start,
-            block_end=block_end,
-            contig_index=contig_index,
-            aln=aln,
-            strand_mode=strand_mode,
-            hits=hits,
+    if not input_path.exists():
+        raise FileNotFoundError(
+            f"{description} does not exist: {path}"
         )
 
-        if ambiguous:
-            return None, True
+    if not input_path.is_file():
+        raise ValueError(
+            f"{description} is not a regular file: {path}"
+        )
 
-    if len(hits) == 1:
-        return next(iter(hits)), False
-
-    return None, False
+_NO_FEATURE = object()
+_AMBIGUOUS = object()
 
 
-# ---------------------------------------------------------------------
-# Single-BAM quantification
-# ---------------------------------------------------------------------
-
-def _build_tid_index(
-    bam: pysam.AlignmentFile,
-    gene_index: GeneIntervalIndex,
-) -> Dict[int, ContigIntervalIndex]:
+def _assign_default_overlaps(
+    read1_overlaps: Dict[str, int],
+    read2_overlaps: Dict[str, int],
+) -> object:
     """
-    Convert GFF contig names to BAM numeric reference IDs once.
+    Fast assignment for:
+
+        min_overlap_bases=1
+        largest_overlap=False
     """
 
-    index_by_tid: Dict[int, ContigIntervalIndex] = {}
+    if not read1_overlaps:
+        if not read2_overlaps:
+            return _NO_FEATURE
 
-    for contig, contig_index in gene_index.items():
-        tid = bam.get_tid(contig)
+        if len(read2_overlaps) == 1:
+            return next(iter(read2_overlaps))
 
-        if tid < 0:
-            logger.warning(
-                "GFF contig %s is absent from BAM header",
-                contig,
-            )
+        return _AMBIGUOUS
+
+    if not read2_overlaps:
+        if len(read1_overlaps) == 1:
+            return next(iter(read1_overlaps))
+
+        return _AMBIGUOUS
+
+    # Genes supported by both mates take priority.
+    if len(read1_overlaps) <= len(read2_overlaps):
+        smaller = read1_overlaps
+        larger = read2_overlaps
+    else:
+        smaller = read2_overlaps
+        larger = read1_overlaps
+
+    shared_gene: Optional[str] = None
+
+    for gene_id in smaller:
+        if gene_id not in larger:
             continue
 
-        index_by_tid[tid] = contig_index
+        if shared_gene is not None:
+            return _AMBIGUOUS
 
-    return index_by_tid
+        shared_gene = gene_id
+
+    if shared_gene is not None:
+        return shared_gene
+
+    # Both dictionaries are non-empty and have no shared genes.
+    # Therefore, their union contains at least two genes.
+    return _AMBIGUOUS
 
 
-def _quantify_one_bam(
+def _assign_overlaps(
+    read1_overlaps: Dict[str, int],
+    read2_overlaps: Dict[str, int],
+    *,
+    min_overlap_bases: int,
+    largest_overlap: bool,
+) -> tuple[str, Optional[str]]:
+    """
+    Apply the validated paired-read assignment rule directly.
+
+    Genes overlapped by both mates are preferred. If no gene is supported
+    by both mates, the union of genes supported by either mate is used.
+    """
+
+    if not read1_overlaps:
+        if not read2_overlaps:
+            return "no_feature", None
+
+        if not largest_overlap:
+            eligible_gene: Optional[str] = None
+
+            for gene_id, overlap in read2_overlaps.items():
+                if overlap < min_overlap_bases:
+                    continue
+
+                if eligible_gene is not None:
+                    return "ambiguous", None
+
+                eligible_gene = gene_id
+
+            if eligible_gene is None:
+                return "insufficient_overlap", None
+
+            return "assigned", eligible_gene
+
+        largest_gene: Optional[str] = None
+        largest_value = -1
+        largest_tied = False
+
+        for gene_id, overlap in read2_overlaps.items():
+            if overlap < min_overlap_bases:
+                continue
+
+            if overlap > largest_value:
+                largest_value = overlap
+                largest_gene = gene_id
+                largest_tied = False
+            elif overlap == largest_value:
+                largest_tied = True
+
+        if largest_gene is None:
+            return "insufficient_overlap", None
+
+        if largest_tied:
+            return "ambiguous", None
+
+        return "assigned", largest_gene
+
+    if not read2_overlaps:
+        if not largest_overlap:
+            eligible_gene: Optional[str] = None
+
+            for gene_id, overlap in read1_overlaps.items():
+                if overlap < min_overlap_bases:
+                    continue
+
+                if eligible_gene is not None:
+                    return "ambiguous", None
+
+                eligible_gene = gene_id
+
+            if eligible_gene is None:
+                return "insufficient_overlap", None
+
+            return "assigned", eligible_gene
+
+        largest_gene: Optional[str] = None
+        largest_value = -1
+        largest_tied = False
+
+        for gene_id, overlap in read1_overlaps.items():
+            if overlap < min_overlap_bases:
+                continue
+
+            if overlap > largest_value:
+                largest_value = overlap
+                largest_gene = gene_id
+                largest_tied = False
+            elif overlap == largest_value:
+                largest_tied = True
+
+        if largest_gene is None:
+            return "insufficient_overlap", None
+
+        if largest_tied:
+            return "ambiguous", None
+
+        return "assigned", largest_gene
+
+    # Search the smaller dictionary for genes present in both mates.
+    if len(read1_overlaps) <= len(read2_overlaps):
+        smaller = read1_overlaps
+        larger = read2_overlaps
+    else:
+        smaller = read2_overlaps
+        larger = read1_overlaps
+
+    shared_found = False
+
+    if not largest_overlap:
+        eligible_gene: Optional[str] = None
+
+        for gene_id, overlap in smaller.items():
+            mate_overlap = larger.get(gene_id)
+
+            if mate_overlap is None:
+                continue
+
+            shared_found = True
+            overlap += mate_overlap
+
+            if overlap < min_overlap_bases:
+                continue
+
+            if eligible_gene is not None:
+                return "ambiguous", None
+
+            eligible_gene = gene_id
+
+        if shared_found:
+            if eligible_gene is None:
+                return "insufficient_overlap", None
+
+            return "assigned", eligible_gene
+
+        # No shared genes: evaluate the union. Because no shared gene exists,
+        # the dictionaries can be traversed independently.
+        for gene_id, overlap in read1_overlaps.items():
+            if overlap < min_overlap_bases:
+                continue
+
+            if eligible_gene is not None:
+                return "ambiguous", None
+
+            eligible_gene = gene_id
+
+        for gene_id, overlap in read2_overlaps.items():
+            if overlap < min_overlap_bases:
+                continue
+
+            if eligible_gene is not None:
+                return "ambiguous", None
+
+            eligible_gene = gene_id
+
+        if eligible_gene is None:
+            return "insufficient_overlap", None
+
+        return "assigned", eligible_gene
+
+    largest_gene: Optional[str] = None
+    largest_value = -1
+    largest_tied = False
+
+    for gene_id, overlap in smaller.items():
+        mate_overlap = larger.get(gene_id)
+
+        if mate_overlap is None:
+            continue
+
+        shared_found = True
+        overlap += mate_overlap
+
+        if overlap < min_overlap_bases:
+            continue
+
+        if overlap > largest_value:
+            largest_value = overlap
+            largest_gene = gene_id
+            largest_tied = False
+        elif overlap == largest_value:
+            largest_tied = True
+
+    if shared_found:
+        if largest_gene is None:
+            return "insufficient_overlap", None
+
+        if largest_tied:
+            return "ambiguous", None
+
+        return "assigned", largest_gene
+
+    # No shared genes: evaluate the union.
+    for gene_id, overlap in read1_overlaps.items():
+        if overlap < min_overlap_bases:
+            continue
+
+        if overlap > largest_value:
+            largest_value = overlap
+            largest_gene = gene_id
+            largest_tied = False
+        elif overlap == largest_value:
+            largest_tied = True
+
+    for gene_id, overlap in read2_overlaps.items():
+        if overlap < min_overlap_bases:
+            continue
+
+        if overlap > largest_value:
+            largest_value = overlap
+            largest_gene = gene_id
+            largest_tied = False
+        elif overlap == largest_value:
+            largest_tied = True
+
+    if largest_gene is None:
+        return "insufficient_overlap", None
+
+    if largest_tied:
+        return "ambiguous", None
+
+    return "assigned", largest_gene
+
+
+def quantify_bam(
     bam_path: str,
-    genes: Mapping[str, GeneFeature],
-    params: QuantParams,
-    gene_index: GeneIntervalIndex,
-) -> Tuple[GeneCounts, QuantStats]:
+    gff_path: str,
+    *,
+    feature_types: str = "gene",
+    id_attribute: str = "locus_tag",
+    min_overlap_bases: int = 1,
+    largest_overlap: bool = False,
+) -> QuantificationResult:
     """
-    Internal implementation for one BAM using a pre-built gene index.
+    Quantify paired-end fragments against GFF gene annotations.
 
-    The compiled Cython backend is used when available. Otherwise, the
-    original Python implementation is used as a fallback.
+    The validated default behaviour corresponds to featureCounts with:
+
+        -p --countReadPairs -s 0 --maxMOp 1000
     """
 
-    counts: GeneCounts = dict.fromkeys(genes, 0.0)
-    stats = QuantStats(bam_path=str(bam_path))
-    start_time = time.perf_counter()
+    _validate_input_path(
+        bam_path,
+        description="BAM file",
+    )
+    _validate_input_path(
+        gff_path,
+        description="GFF file",
+    )
 
-    # ---------------------------------------------------------------
-    # Compiled Cython implementation
-    # ---------------------------------------------------------------
+    config = QuantificationConfig(
+        bam_path=str(bam_path),
+        gff_path=str(gff_path),
+        feature_types=feature_types,
+        id_attribute=id_attribute,
+        min_overlap_bases=min_overlap_bases,
+        largest_overlap=largest_overlap,
+    )
 
-    if CYTHON_BACKEND_AVAILABLE:
-        multi_mode_code = {
-            "ignore": 0,
-            "unique": 1,
-            "fractional": 2,
-        }[params.multi_mode]
+    genes = load_gene_features_from_gff(
+        gff_path,
+        feature_types=feature_types,
+        id_attribute=id_attribute,
+    )
 
-        counts, raw_stats = quantify_bam_fast(
-            str(bam_path),
-            tuple(genes),
-            gene_index,
-            params.strand_mode,
-            params.mapq_min,
-            multi_mode_code,
-            params.use_nh_tag,
-        )
+    index = build_gene_interval_index(genes)
 
-        (
-            stats.total_records,
-            stats.primary_mapped_records,
-            stats.below_mapq,
-            stats.multimapping_discarded,
-            stats.no_annotated_contig,
-            stats.no_feature,
-            stats.ambiguous,
-            stats.assigned_records,
-            stats.assigned_weight,
-        ) = raw_stats
+    gene_counts = {
+        gene_id: 0
+        for gene_id in genes
+    }
 
-        stats.elapsed_seconds = time.perf_counter() - start_time
+    assigned = 0
+    unmapped = 0
+    no_feature = 0
+    ambiguous = 0
+    insufficient_overlap = 0
 
-        logger.info(
-            "Quantification finished for %s: "
-            "records=%d, primary_mapped=%d, assigned=%d, "
-            "assigned_weight=%.3f, ambiguous=%d, no_feature=%d, "
-            "elapsed=%.3f s",
-            bam_path,
-            stats.total_records,
-            stats.primary_mapped_records,
-            stats.assigned_records,
-            stats.assigned_weight,
-            stats.ambiguous,
-            stats.no_feature,
-            stats.elapsed_seconds,
-        )
+    fragment_stats = FragmentStats()
 
-        return counts, stats
+    # Coordinate-sorted BAM records may have many alignments between mates.
+    pending: Dict[str, pysam.AlignedSegment] = {}
 
-    # ---------------------------------------------------------------
-    # Pure-Python fallback
-    # ---------------------------------------------------------------
+    reference_contig_indexes: tuple[Optional[ContigIntervalIndex], ...] = ()
+    overlap_function = normalized_blocks_gene_overlaps
+
+    use_default_assignment = (
+        min_overlap_bases == 1
+        and not largest_overlap
+    )
 
     with pysam.AlignmentFile(bam_path, "rb") as bam:
-        gene_index_by_tid = _build_tid_index(
-            bam=bam,
-            gene_index=gene_index,
+        reference_contig_indexes = tuple(
+            index.contigs.get(reference_name)
+            for reference_name in bam.references
         )
 
-        for aln in bam.fetch(until_eof=True):
-            stats.total_records += 1
+        for read in bam.fetch(until_eof=True):
+            fragment_stats.total_records += 1
 
-            if aln.is_unmapped:
+            if read.is_secondary:
+                fragment_stats.secondary_records += 1
                 continue
 
-            if aln.is_secondary:
+            if read.is_supplementary:
+                fragment_stats.supplementary_records += 1
                 continue
 
-            if aln.is_supplementary:
+            fragment_stats.primary_records += 1
+
+            query_name = read.query_name
+            mate = pending.pop(query_name, None)
+
+            if mate is None:
+                pending[query_name] = read
                 continue
 
-            stats.primary_mapped_records += 1
+            fragment_stats.paired_fragments += 1
 
-            if aln.mapping_quality < params.mapq_min:
-                stats.below_mapq += 1
+            if mate.is_read1:
+                read1 = mate
+                read2 = read
+            elif read.is_read1:
+                read1 = read
+                read2 = mate
+            else:
+                read1 = mate
+                read2 = read
+
+            read1_mapped = not read1.is_unmapped
+            read2_mapped = not read2.is_unmapped
+
+            if read1_mapped and read2_mapped:
+                fragment_stats.fully_mapped_fragments += 1
+
+                if read1.reference_id != read2.reference_id:
+                    fragment_stats.discordant_contig_fragments += 1
+
+            elif read1_mapped or read2_mapped:
+                fragment_stats.partially_mapped_fragments += 1
+
+            else:
+                fragment_stats.fully_unmapped_fragments += 1
+                fragment_stats.fragments_with_no_mapped_part += 1
+                unmapped += 1
                 continue
 
-            contig_index = gene_index_by_tid.get(
-                aln.reference_id
-            )
+            if read1_mapped:
+                read1_blocks = read1.get_blocks()
+                read1_contig_index = reference_contig_indexes[
+                    read1.reference_id
+                ]
 
-            if contig_index is None:
-                stats.no_annotated_contig += 1
-                continue
+                if read1_blocks and read1_contig_index is not None:
+                    read1_overlaps = overlap_function(
+                        read1_blocks,
+                        read1_contig_index,
+                    )
+                else:
+                    read1_overlaps = {}
+            else:
+                read1_overlaps = {}
 
-            weight = _read_weight(
-                aln=aln,
-                params=params,
-            )
+            if read2_mapped:
+                read2_blocks = read2.get_blocks()
+                read2_contig_index = reference_contig_indexes[
+                    read2.reference_id
+                ]
 
-            if weight == 0.0:
-                stats.multimapping_discarded += 1
-                continue
+                if read2_blocks and read2_contig_index is not None:
+                    read2_overlaps = overlap_function(
+                        read2_blocks,
+                        read2_contig_index,
+                    )
+                else:
+                    read2_overlaps = {}
+            else:
+                read2_overlaps = {}
 
-            gene_id, ambiguous = _assign_alignment_to_gene(
-                aln=aln,
-                contig_index=contig_index,
-                strand_mode=params.strand_mode,
-            )
-
-            if ambiguous:
-                stats.ambiguous += 1
-                continue
-
-            if gene_id is None:
-                stats.no_feature += 1
-                continue
-
-            counts[gene_id] += weight
-            stats.assigned_records += 1
-            stats.assigned_weight += weight
-
-            if (
-                params.log_every > 0
-                and logger.isEnabledFor(logging.INFO)
-                and stats.total_records % params.log_every == 0
-            ):
-                elapsed = time.perf_counter() - start_time
-
-                logger.info(
-                    "Quantify %s: records=%d, assigned=%d, "
-                    "elapsed=%.2f s",
-                    Path(bam_path).name,
-                    stats.total_records,
-                    stats.assigned_records,
-                    elapsed,
+            if use_default_assignment:
+                assignment = _assign_default_overlaps(
+                    read1_overlaps,
+                    read2_overlaps,
                 )
 
-    stats.elapsed_seconds = time.perf_counter() - start_time
+                if assignment is _NO_FEATURE:
+                    no_feature += 1
 
-    logger.info(
-        "Quantification finished for %s: "
-        "records=%d, primary_mapped=%d, assigned=%d, "
-        "assigned_weight=%.3f, ambiguous=%d, no_feature=%d, "
-        "elapsed=%.3f s",
-        bam_path,
-        stats.total_records,
-        stats.primary_mapped_records,
-        stats.assigned_records,
-        stats.assigned_weight,
-        stats.ambiguous,
-        stats.no_feature,
-        stats.elapsed_seconds,
-    )
+                elif assignment is _AMBIGUOUS:
+                    ambiguous += 1
 
-    return counts, stats
+                else:
+                    gene_counts[assignment] += 1
+                    assigned += 1
 
+            else:
+                status, gene_id = _assign_overlaps(
+                    read1_overlaps,
+                    read2_overlaps,
+                    min_overlap_bases=min_overlap_bases,
+                    largest_overlap=largest_overlap,
+                )
 
-def quantify_genes_single_bam(
-    bam_path: str,
-    genes: Dict[str, GeneFeature],
-    p: QuantParams,
-) -> GeneCounts:
-    """
-    Quantify genes from one BAM file.
+                if status == "assigned":
+                    if gene_id is None:
+                        raise RuntimeError(
+                            "Assigned fragment has no gene identifier"
+                        )
 
-    This function preserves the original BOTAS public interface and
-    returns only the count dictionary.
-    """
+                    gene_counts[gene_id] += 1
+                    assigned += 1
 
-    gene_index = build_gene_interval_index(genes)
+                elif status == "no_feature":
+                    no_feature += 1
 
-    counts, _stats = _quantify_one_bam(
-        bam_path=bam_path,
-        genes=genes,
-        params=p,
-        gene_index=gene_index,
-    )
+                elif status == "ambiguous":
+                    ambiguous += 1
 
-    return counts
+                elif status == "insufficient_overlap":
+                    insufficient_overlap += 1
 
+                else:
+                    raise RuntimeError(
+                        f"Unsupported assignment status: {status!r}"
+                    )
 
-def quantify_genes_single_bam_with_stats(
-    bam_path: str,
-    genes: Dict[str, GeneFeature],
-    p: QuantParams,
-) -> Tuple[GeneCounts, QuantStats]:
-    """
-    Quantify one BAM and also return assignment statistics.
-    """
+    # Preserve fragment accounting for incomplete pairs.
+    for read in pending.values():
+        fragment_stats.orphan_fragments += 1
 
-    gene_index = build_gene_interval_index(genes)
+        if read.is_unmapped:
+            fragment_stats.fully_unmapped_fragments += 1
+            fragment_stats.fragments_with_no_mapped_part += 1
+            unmapped += 1
+            continue
 
-    return _quantify_one_bam(
-        bam_path=bam_path,
-        genes=genes,
-        params=p,
-        gene_index=gene_index,
-    )
+        fragment_stats.partially_mapped_fragments += 1
 
+        blocks = read.get_blocks()
+        contig_index = reference_contig_indexes[read.reference_id]
 
-# ---------------------------------------------------------------------
-# Multiple-BAM quantification
-# ---------------------------------------------------------------------
+        if blocks and contig_index is not None:
+            overlaps = overlap_function(
+                blocks,
+                contig_index,
+            )
+        else:
+            overlaps = {}
 
-def _sample_name_from_bam(
-    bam_path: str,
-    existing_names: set[str],
-) -> str:
-    """
-    Generate a unique sample name from a BAM filename.
-    """
+        if read.is_read2:
+            read1_overlaps = {}
+            read2_overlaps = overlaps
+        else:
+            read1_overlaps = overlaps
+            read2_overlaps = {}
 
-    path = Path(bam_path)
-
-    name = path.name
-
-    if name.lower().endswith(".bam"):
-        name = name[:-4]
-
-    base_name = name
-    suffix = 2
-
-    while name in existing_names:
-        name = f"{base_name}_{suffix}"
-        suffix += 1
-
-    existing_names.add(name)
-    return name
-
-
-def quantify_genes_bams(
-    bam_paths: Sequence[str],
-    genes: Dict[str, GeneFeature],
-    p: QuantParams,
-) -> MultiBamCounts:
-    """
-    Quantify multiple BAM files.
-
-    Returns
-    -------
-    dict
-        Mapping:
-
-            sample_name -> {gene_id: count}
-
-    The gene interval index is built once and reused for every BAM.
-    """
-
-    counts_by_sample, _stats_by_sample = quantify_genes_bams_with_stats(
-        bam_paths=bam_paths,
-        genes=genes,
-        p=p,
-    )
-
-    return counts_by_sample
-
-
-def quantify_genes_bams_with_stats(
-    bam_paths: Sequence[str],
-    genes: Dict[str, GeneFeature],
-    p: QuantParams,
-) -> Tuple[MultiBamCounts, Dict[str, QuantStats]]:
-    """
-    Quantify multiple BAM files and return per-sample statistics.
-    """
-
-    if not bam_paths:
-        raise ValueError("At least one BAM file is required")
-
-    gene_index = build_gene_interval_index(genes)
-
-    counts_by_sample: MultiBamCounts = {}
-    stats_by_sample: Dict[str, QuantStats] = {}
-    used_sample_names: set[str] = set()
-
-    for bam_path in bam_paths:
-        sample_name = _sample_name_from_bam(
-            bam_path,
-            used_sample_names,
+        status, gene_id = _assign_overlaps(
+            read1_overlaps,
+            read2_overlaps,
+            min_overlap_bases=min_overlap_bases,
+            largest_overlap=largest_overlap,
         )
 
-        logger.info(
-            "Quantifying sample %s from BAM: %s",
-            sample_name,
-            bam_path,
-        )
+        if status == "assigned":
+            if gene_id is None:
+                raise RuntimeError(
+                    "Assigned orphan has no gene identifier"
+                )
 
-        counts, stats = _quantify_one_bam(
-            bam_path=bam_path,
-            genes=genes,
-            params=p,
-            gene_index=gene_index,
-        )
+            gene_counts[gene_id] += 1
+            assigned += 1
 
-        counts_by_sample[sample_name] = counts
-        stats_by_sample[sample_name] = stats
+        elif status == "no_feature":
+            no_feature += 1
 
-    return counts_by_sample, stats_by_sample
+        elif status == "ambiguous":
+            ambiguous += 1
+
+        elif status == "insufficient_overlap":
+            insufficient_overlap += 1
+
+        else:
+            raise RuntimeError(
+                f"Unsupported assignment status: {status!r}"
+            )
+
+    summary = AssignmentSummary(
+        assigned=assigned,
+        unmapped=unmapped,
+        no_feature=no_feature,
+        ambiguous=ambiguous,
+        insufficient_overlap=insufficient_overlap,
+    )
+
+    quantification = QuantificationResult(
+        gene_counts=gene_counts,
+        genes=genes,
+        summary=summary,
+        fragment_stats=fragment_stats,
+        config=config,
+    )
+
+    quantification.validate()
+
+    return quantification

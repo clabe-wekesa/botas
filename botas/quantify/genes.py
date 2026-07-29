@@ -1,127 +1,283 @@
-# botas/quantify/genes.py
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, Iterable, List, Optional, Tuple
+from pathlib import Path
+from typing import Dict, Iterable, Mapping, Sequence, Tuple
+from urllib.parse import unquote
 import logging
+
 
 logger = logging.getLogger(__name__)
 
+Interval = Tuple[int, int]
 
-@dataclass(frozen=True)
+
+@dataclass(frozen=True, slots=True)
 class GeneFeature:
+    """
+    Genomic feature used for quantification.
+
+    Coordinates are stored as 0-based, half-open intervals:
+    [start, end)
+    """
+
     gene_id: str
     contig: str
-    strand: str  # "+", "-"
-    blocks: Tuple[Tuple[int, int], ...]  # 0-based, half-open [start,end)
-    length: int  # merged exonic length
+    strand: str
+    blocks: Tuple[Interval, ...]
+    length: int
+
+    @property
+    def start(self) -> int:
+        return self.blocks[0][0]
+
+    @property
+    def end(self) -> int:
+        return self.blocks[-1][1]
 
 
-def _merge_intervals(intervals: List[Tuple[int, int]]) -> List[Tuple[int, int]]:
-    if not intervals:
-        return []
-    intervals.sort()
-    merged = [intervals[0]]
-    for s, e in intervals[1:]:
-        ps, pe = merged[-1]
-        if s <= pe:
-            merged[-1] = (ps, max(pe, e))
-        else:
-            merged.append((s, e))
-    return merged
+def parse_gff3_attributes(text: str) -> Dict[str, str]:
+    """
+    Parse the ninth column of a GFF3 record.
 
+    Percent-encoded values are decoded according to the GFF3 format.
+    Empty attributes and malformed entries without '=' are ignored.
+    """
 
-def _pick_gene_id(attrs: str, key: str) -> Optional[str]:
-    # Robust-enough GFF3 attribute parsing for common cases:
-    # ID=gene123;Name=...  or  gene_id=xxx;  or  Parent=...
-    # We prefer ID=... then gene_id=...
-    parts = attrs.split(";")
-    kv = {}
-    for p in parts:
-        p = p.strip()
-        if "=" not in p:
+    attributes: Dict[str, str] = {}
+
+    for raw_field in text.strip().strip(";").split(";"):
+        field = raw_field.strip()
+
+        if not field or "=" not in field:
             continue
-        k, v = p.split("=", 1)
-        kv[k.strip()] = v.strip()
 
-    if key == "auto":
-        return kv.get("Parent") or kv.get("ID") or kv.get("gene_id")
+        key, value = field.split("=", 1)
+        key = unquote(key.strip())
+        value = unquote(value.strip())
 
-    return kv.get(key)
+        if key:
+            attributes[key] = value
+
+    return attributes
+
+
+def merge_intervals(intervals: Iterable[Interval]) -> Tuple[Interval, ...]:
+    """
+    Merge overlapping or directly adjacent half-open intervals.
+    """
+
+    ordered = sorted(intervals)
+
+    if not ordered:
+        return ()
+
+    merged = [ordered[0]]
+
+    for start, end in ordered[1:]:
+        previous_start, previous_end = merged[-1]
+
+        if start <= previous_end:
+            merged[-1] = (previous_start, max(previous_end, end))
+        else:
+            merged.append((start, end))
+
+    return tuple(merged)
+
+
+def _normalise_feature_types(
+    feature_types: str | Sequence[str],
+) -> frozenset[str]:
+    if isinstance(feature_types, str):
+        values = [feature_types]
+    else:
+        values = list(feature_types)
+
+    cleaned = frozenset(value.strip() for value in values if value.strip())
+
+    if not cleaned:
+        raise ValueError("At least one GFF feature type must be provided")
+
+    return cleaned
 
 
 def load_gene_features_from_gff(
-    gff_path: str,
-    feature_type: str = "CDS",
-    id_from: str = "auto",
+    gff_path: str | Path,
+    *,
+    feature_types: str | Sequence[str] = "gene",
+    id_attribute: str = "locus_tag",
 ) -> Dict[str, GeneFeature]:
     """
-    Phase-1 assumption (bacterial): quantify on CDS blocks grouped by gene.
+    Load quantifiable features from a GFF3 annotation.
 
-    Strategy:
-      - group intervals by gene_id
-      - merge overlapping/adjacent intervals => exon/CDS blocks
-      - compute merged length
+    Parameters
+    ----------
+    gff_path
+        Input GFF3 file.
+    feature_types
+        GFF feature type or types to load, normally ``gene``.
+    id_attribute
+        Attribute used as the unique feature identifier, for example
+        ``locus_tag``, ``ID`` or ``gene_id``.
 
-    Notes:
-      - GFF coordinates are 1-based inclusive. We convert to 0-based half-open.
-      - For bacterial genomes, CDS entries often correspond to genes (or multiple CDS per gene for split annotations).
+    Returns
+    -------
+    dict
+        Mapping from feature identifier to GeneFeature.
+
+    Raises
+    ------
+    ValueError
+        If coordinates are invalid, identifiers are duplicated across
+        incompatible contigs or strands, or no features can be loaded.
     """
-    by_gene: Dict[str, List[Tuple[str, str, int, int]]] = {}  # gene_id -> list(contig,strand,s,e)
 
-    with open(gff_path, "r", encoding="utf-8") as fh:
-        for line in fh:
+    path = Path(gff_path)
+
+    if not path.is_file():
+        raise FileNotFoundError(f"GFF file does not exist: {path}")
+
+    accepted_types = _normalise_feature_types(feature_types)
+
+    # gene_id -> list of (contig, strand, start, end, line_number)
+    records: Dict[str, list[tuple[str, str, int, int, int]]] = {}
+
+    matching_records = 0
+    missing_identifier = 0
+
+    with path.open("r", encoding="utf-8") as handle:
+        for line_number, raw_line in enumerate(handle, start=1):
+            line = raw_line.rstrip("\n")
+
             if not line or line.startswith("#"):
                 continue
-            cols = line.rstrip("\n").split("\t")
-            if len(cols) < 9:
-                continue
-            contig, _source, ftype, start, end, _score, strand, _phase, attrs = cols
-            if ftype != feature_type:
+
+            columns = line.split("\t")
+
+            if len(columns) != 9:
+                raise ValueError(
+                    f"{path}:{line_number}: expected 9 tab-separated "
+                    f"GFF columns, found {len(columns)}"
+                )
+
+            (
+                contig,
+                _source,
+                feature_type,
+                start_text,
+                end_text,
+                _score,
+                strand,
+                _phase,
+                attribute_text,
+            ) = columns
+
+            if feature_type not in accepted_types:
                 continue
 
-            gid = _pick_gene_id(attrs, id_from)
-            if gid is None:
-                # fallback: try Parent=... if ID absent (common when CDS has Parent=gene)
-                # We won't over-engineer; keep it simple.
-                parts = attrs.split(";")
-                parent = None
-                for p in parts:
-                    p = p.strip()
-                    if p.startswith("Parent="):
-                        parent = p.split("=", 1)[1].strip()
-                        break
-                gid = parent
+            matching_records += 1
 
-            if gid is None:
+            if strand not in {"+", "-"}:
+                raise ValueError(
+                    f"{path}:{line_number}: feature has unsupported strand "
+                    f"{strand!r}; expected '+' or '-'"
+                )
+
+            try:
+                start_1based = int(start_text)
+                end_1based = int(end_text)
+            except ValueError as error:
+                raise ValueError(
+                    f"{path}:{line_number}: start and end must be integers"
+                ) from error
+
+            if start_1based < 1 or end_1based < start_1based:
+                raise ValueError(
+                    f"{path}:{line_number}: invalid coordinates "
+                    f"{start_1based}-{end_1based}"
+                )
+
+            attributes = parse_gff3_attributes(attribute_text)
+            gene_id = attributes.get(id_attribute)
+
+            if not gene_id:
+                missing_identifier += 1
                 continue
 
-            s1 = int(start)
-            e1 = int(end)
-            # convert 1-based inclusive to 0-based half-open
-            s0 = s1 - 1
-            e0 = e1  # inclusive -> half-open end = end
-            by_gene.setdefault(gid, []).append((contig, strand, s0, e0))
+            # GFF3: 1-based inclusive -> Python: 0-based half-open.
+            start_0based = start_1based - 1
+            end_0based = end_1based
+
+            records.setdefault(gene_id, []).append(
+                (
+                    contig,
+                    strand,
+                    start_0based,
+                    end_0based,
+                    line_number,
+                )
+            )
+
+    if matching_records == 0:
+        requested = ", ".join(sorted(accepted_types))
+        raise ValueError(
+            f"No records of GFF feature type(s) {requested} were found in {path}"
+        )
+
+    if not records:
+        raise ValueError(
+            f"No features could be loaded from {path} using attribute "
+            f"{id_attribute!r}. Matching records without that attribute: "
+            f"{missing_identifier}"
+        )
 
     features: Dict[str, GeneFeature] = {}
-    for gid, rows in by_gene.items():
-        # genes should not span contigs/strands; keep first, warn if inconsistent
-        contig0, strand0, _, _ = rows[0]
-        intervals = []
-        for contig, strand, s, e in rows:
-            if contig != contig0 or strand != strand0:
-                logger.warning("Gene %s has inconsistent contig/strand in GFF; keeping first (%s,%s)", gid, contig0, strand0)
-                continue
-            intervals.append((s, e))
-        merged = _merge_intervals(intervals)
-        length = sum(e - s for s, e in merged)
-        features[gid] = GeneFeature(
-            gene_id=gid,
-            contig=contig0,
-            strand=strand0,
-            blocks=tuple(merged),
+
+    for gene_id, gene_records in records.items():
+        first_contig, first_strand, _, _, _ = gene_records[0]
+        intervals: list[Interval] = []
+
+        for contig, strand, start, end, line_number in gene_records:
+            if contig != first_contig:
+                raise ValueError(
+                    f"Feature {gene_id!r} occurs on multiple contigs: "
+                    f"{first_contig!r} and {contig!r} "
+                    f"(detected at line {line_number})"
+                )
+
+            if strand != first_strand:
+                raise ValueError(
+                    f"Feature {gene_id!r} occurs on multiple strands: "
+                    f"{first_strand!r} and {strand!r} "
+                    f"(detected at line {line_number})"
+                )
+
+            intervals.append((start, end))
+
+        blocks = merge_intervals(intervals)
+        length = sum(end - start for start, end in blocks)
+
+        if length <= 0:
+            raise ValueError(
+                f"Feature {gene_id!r} has zero or negative merged length"
+            )
+
+        features[gene_id] = GeneFeature(
+            gene_id=gene_id,
+            contig=first_contig,
+            strand=first_strand,
+            blocks=blocks,
             length=length,
         )
 
-    logger.info("Loaded %d gene features from %s (type=%s)", len(features), gff_path, feature_type)
+    logger.info(
+        "Loaded %d features from %s using type(s) %s and attribute %s; "
+        "%d matching records lacked the identifier",
+        len(features),
+        path,
+        ",".join(sorted(accepted_types)),
+        id_attribute,
+        missing_identifier,
+    )
+
     return features

@@ -50,60 +50,154 @@ def load_genes(gff_path, feature_types=("gene",)):
     return genes
 
 
-def _cov_one_contig(bam_path, contig, gs):
-    total_depth = {g["id"]: 0 for g in gs}
-    gene_len = {g["id"]: max(1, g["end"] - g["start"] + 1) for g in gs}
+def _cov_one_region(bam_path, contig, region_start, region_end, genes):
+    """
+    Calculate partial gene depth within one non-overlapping genomic region.
+
+    region_start and region_end use 0-based, half-open coordinates,
+    as required by pysam.
+    """
+    partial_depth = {g["id"]: 0 for g in genes}
 
     with pysam.AlignmentFile(bam_path, "rb") as bam:
         if contig not in bam.references:
-            return total_depth, gene_len
+            return partial_depth
 
-        print(f"[coverage] {contig}: {len(gs)} genes")
-
-        i = 0
-        n = len(gs)
         for col in bam.pileup(
             contig,
+            region_start,
+            region_end,
             truncate=True,
             stepper="all",
             min_base_quality=0,
         ):
+            # Convert pysam's 0-based position to GFF's 1-based position.
             pos = col.reference_pos + 1
             depth = col.nsegments
 
-            while i < n and gs[i]["end"] < pos:
-                i += 1
+            for gene in genes:
+                if gene["start"] <= pos <= gene["end"]:
+                    partial_depth[gene["id"]] += depth
 
-            j = i
-            while j < n and gs[j]["start"] <= pos <= gs[j]["end"]:
-                total_depth[gs[j]["id"]] += depth
-                j += 1
-
-    return total_depth, gene_len
+    return partial_depth
 
 
-def compute_gene_coverage(bam_path, genes, max_workers=None):
-    # group & sort
+def _make_coverage_tasks(by_contig, window_size):
+    """
+    Divide every contig into non-overlapping windows.
+
+    Only genes overlapping a window are included in that task.
+    """
+    tasks = []
+
+    for contig, genes in by_contig.items():
+        if not genes:
+            continue
+
+        first_position = min(g["start"] for g in genes)
+        last_position = max(g["end"] for g in genes)
+
+        # Convert the GFF 1-based start to a pysam 0-based start.
+        region_start = first_position - 1
+
+        while region_start < last_position:
+            region_end = min(region_start + window_size, last_position)
+
+            overlapping_genes = [
+                g
+                for g in genes
+                if g["end"] > region_start and g["start"] <= region_end
+            ]
+
+            if overlapping_genes:
+                tasks.append(
+                    (
+                        contig,
+                        region_start,
+                        region_end,
+                        overlapping_genes,
+                    )
+                )
+
+            region_start = region_end
+
+    return tasks
+
+
+def compute_gene_coverage(
+    bam_path,
+    genes,
+    max_workers=None,
+    window_size=250_000,
+):
+    """
+    Calculate mean coverage for every gene.
+
+    Coverage is parallelized across non-overlapping genomic windows.
+    """
     by_contig = {}
-    for g in genes:
-        by_contig.setdefault(g["chrom"], []).append(g)
-    for gs in by_contig.values():
-        gs.sort(key=lambda x: x["start"])
 
-    total_depth = {}
-    gene_len = {}
+    for gene in genes:
+        by_contig.setdefault(gene["chrom"], []).append(gene)
 
-    with ProcessPoolExecutor(max_workers=max_workers) as ex:
-        futures = {
-            ex.submit(_cov_one_contig, bam_path, contig, gs): contig
-            for contig, gs in by_contig.items()
-        }
-        for fut in as_completed(futures):
-            td, gl = fut.result()
-            total_depth.update(td)
-            gene_len.update(gl)
+    for contig_genes in by_contig.values():
+        contig_genes.sort(key=lambda gene: gene["start"])
 
-    return {gid: total_depth[gid] / gene_len[gid] for gid in total_depth}
+    total_depth = {gene["id"]: 0 for gene in genes}
+
+    gene_len = {
+        gene["id"]: max(1, gene["end"] - gene["start"] + 1)
+        for gene in genes
+    }
+
+    tasks = _make_coverage_tasks(
+        by_contig=by_contig,
+        window_size=window_size,
+    )
+
+    print(
+        f"[coverage] {len(genes)} genes, "
+        f"{len(tasks)} regions, "
+        f"{max_workers or 'default'} workers"
+    )
+
+    if max_workers == 1:
+        for contig, start, end, region_genes in tasks:
+            partial_depth = _cov_one_region(
+                bam_path,
+                contig,
+                start,
+                end,
+                region_genes,
+            )
+
+            for gene_id, depth in partial_depth.items():
+                total_depth[gene_id] += depth
+
+    else:
+        with ProcessPoolExecutor(max_workers=max_workers) as executor:
+            futures = [
+                executor.submit(
+                    _cov_one_region,
+                    bam_path,
+                    contig,
+                    start,
+                    end,
+                    region_genes,
+                )
+                for contig, start, end, region_genes in tasks
+            ]
+
+            for future in as_completed(futures):
+                partial_depth = future.result()
+
+                for gene_id, depth in partial_depth.items():
+                    total_depth[gene_id] += depth
+
+    return {
+        gene_id: total_depth[gene_id] / gene_len[gene_id]
+        for gene_id in total_depth
+    }
 
 
 def operon_stats(genes, cov):

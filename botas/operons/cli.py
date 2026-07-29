@@ -12,15 +12,10 @@ Examples
 --------
 1) Infer operons from a single RNA-seq experiment
 
- botas getOperons --bam sample.bam --gff genome.gff --strand-aware --max-igd 50 --min-coverage 2.0 -o sample.operons.tsv
-
 2) Infer operons across multiple conditions (consensus)
-
-  botas getOperons --bam ctrl.bam stress.bam --gff genome.gff --strand-aware --consensus --min-support 0.6 --max-igd 50 -o consensus.operons.tsv
 
 3) Write operons as GFF features (for genome browsers)
 
-  botas getOperons --bam sample.bam --gff genome.gff --strand-aware --write-gff -o sample.operons.tsv
 
 
 Notes
@@ -51,6 +46,9 @@ def _directons(genes):
 
 
 def run_get_operons(args):
+    if args.threads < 1:
+        raise ValueError("--threads must be at least 1")
+
     genes = load_genes(args.gff, feature_types=("gene",))
     # -------------------------------------------------
     # Resolve output paths (prefix vs explicit output)
@@ -85,8 +83,14 @@ def run_get_operons(args):
     if not genes:
         raise ValueError("No genes loaded from GFF")
 
-    cov_by_bam = [compute_gene_coverage(bam, genes) for bam in args.bam]
-    cov = cov_by_bam[0]
+    cov_by_bam = [compute_gene_coverage(bam, genes, max_workers=args.threads) for bam in args.bam]
+
+    if args.consensus:
+        cov = {gene["id"]: sum(bam_cov.get(gene["id"], 0.0) for bam_cov in cov_by_bam) / len(cov_by_bam)
+            for gene in genes
+        }
+    else:
+        cov = cov_by_bam[0]
 
     directons = _directons(genes)
     operons_all = []
@@ -120,13 +124,15 @@ def run_get_operons(args):
                 merge_by_support(ds, pair_support, args.min_support)
             )
 
+    retained_operons = []
+
     with open(out_tsv, "w", encoding="utf-8") as out:
         out.write(
             "operon_id\tchrom\tstrand\tstart\tend\tn_genes\tgene_ids\tigds\t"
             "mean_coverage\tmin_coverage\tcoverage_cv\tscore\tconfidence\n"
         )
 
-        for i, op in enumerate(operons_all, 1):
+        for op in operons_all:
             chrom = op[0]["chrom"]
             strand = op[0]["strand"]
             start = min(g["start"] for g in op)
@@ -136,18 +142,28 @@ def run_get_operons(args):
             igds = operon_igds(op)
             mean_cov, min_cov, cv = operon_stats(op, cov)
             score = operon_score(igds, mean_cov, min_cov, cv, args.max_igd)
-            conf = operon_confidence(score)
+
             if score < args.min_score:
                 continue
 
+            retained_operons.append(op)
+            operon_id = len(retained_operons)
+            conf = operon_confidence(score)
+
             out.write(
-                f"operon_{i}\t{chrom}\t{strand}\t{start}\t{end}\t{len(op)}\t"
-                f"{ids}\t{','.join(map(str, igds))}\t"
-                f"{mean_cov:.3f}\t{min_cov:.3f}\t{cv:.3f}\t{score:.3f}\t{conf}\n"
+                f"operon_{operon_id}\t{chrom}\t{strand}\t{start}\t{end}\t"
+                f"{len(op)}\t{ids}\t{','.join(map(str, igds))}\t"
+                f"{mean_cov:.3f}\t{min_cov:.3f}\t{cv:.3f}\t"
+                f"{score:.3f}\t{conf}\n"
             )
 
     if args.write_gff:
-        write_operons_gff(out_gff, operons_all, cov, args.max_igd)
+        write_operons_gff(
+            out_gff,
+            retained_operons,
+            cov,
+            args.max_igd,
+        )
 
 
 def add_operon_args(p: argparse.ArgumentParser) -> None:
@@ -168,33 +184,36 @@ def add_operon_args(p: argparse.ArgumentParser) -> None:
     io.add_argument("--out","-o", required=True, metavar="TSV",
         help="Output TSV file containing predicted operons.")
 
+    io.add_argument("--threads", "-t", type=int, default=1, metavar="INT",
+        help=(
+            "Number of worker processes used for gene coverage calculation "
+            "(default: 1)."))
+
     # =========================================================
     # Operon geometry (genomic constraints)
     # =========================================================
     geom = p.add_argument_group("Operon geometry")
 
-    geom.add_argument("--max-igd", type=int, default=50,
+    geom.add_argument("--max-igd", type=int, default=70,
         help=(
             "Maximum intergenic distance (bp) between adjacent genes "
-            "to allow operon linkage (default: 50)."))
+            "to allow operon linkage (default: 70)."))
 
-    geom.add_argument("--strand-aware", action="store_true",
-        help="Require adjacent genes to be on the same strand (recommended).")
 
     # =========================================================
     # Expression / coverage constraints
     # =========================================================
     cov = p.add_argument_group("Coverage constraints")
 
-    cov.add_argument("--min-coverage", type=float, default=1.0, metavar="X",
+    cov.add_argument("--min-coverage", type=float, default=0.5, metavar="X",
         help=(
             "Minimum mean per-base coverage required for each gene "
-            "to be considered expressed (default: 1.0)."))
+            "to be considered expressed (default: 0.5)."))
 
-    cov.add_argument("--min-cov-ratio", type=float, default=0.5, metavar="R",
+    cov.add_argument("--min-cov-ratio", type=float, default=0.25, metavar="R",
         help=(
             "Minimum coverage ratio between adjacent genes "
-            "(min/ max) to support co-transcription (default: 0.5)."))
+            "(min/ max) to support co-transcription (default: 0.25)."))
 
     # =========================================================
     # Multi-BAM consensus inference
