@@ -2,55 +2,81 @@
 
 ## Bacterial Operon-Aware Transcriptome Alignment System
 
-BOTAS is a bacterial RNA-seq analysis framework that integrates read alignment, gene quantification, operon inference, and operon-level quantification within a unified Python package. It is specifically designed for bacterial transcriptomes, providing native support for circular genomes, operon-aware analyses, and strand-specific expression profiling.
+BOTAS is an integrated Python framework for bacterial RNA-seq analysis that combines read alignment, gene quantification, and operon inference within a single command-line toolkit. Unlike general-purpose RNA-seq pipelines that require multiple external programs, BOTAS provides a unified workflow specifically designed for bacterial transcriptomes, with native support for circular genomes, paired-end sequencing, strand-specific expression analysis, and operon-aware transcriptomics.
 
-Unlike general-purpose RNA-seq aligners developed primarily for eukaryotic transcriptomes, BOTAS addresses the unique characteristics of bacterial genomes, including dense gene organization, polycistronic transcription, operon architecture, and circular chromosomes.
-
----
-
-## Key Features
-
-- Seed-and-extend alignment engine optimized for bacterial genomes
-- Native support for circular chromosomes and plasmids
-- Paired-end and single-end read alignment
-- Strand-aware gene expression quantification
-- Gene-level and operon-level expression quantification
-- Operon inference from aligned reads
-- Operon-aware transcriptome analysis
-- Optional rRNA filtering
-- Parallel execution for scalable performance
-- Modular and extensible Python architecture
+The framework is designed for reproducible bacterial RNA-seq analysis while remaining modular enough for integration into automated bioinformatics workflows.
 
 ---
 
-## Why BOTAS?
+# Features
 
-Most RNA-seq aligners were designed for eukaryotic transcriptomes and assume splicing, large introns, and linear chromosomes. These assumptions are inappropriate for bacterial transcriptomes, which are characterized by:
+### Alignment
 
-- Densely packed genes
-- Polycistronic transcripts organized into operons
-- Circular chromosomes and plasmids
-- Strong dependence on strand-specific transcription
+* Native alignment engine optimized for bacterial genomes
+* Single-end and paired-end RNA-seq alignment
+* Native support for circular chromosomes and plasmids
+* Automatic handling of reads spanning the origin of replication
+* Edit-distance alignment using Edlib
+* Mapping quality estimation
+* BAM output compatible with standard downstream tools
 
-BOTAS addresses these challenges through native circular-genome support, operon-aware analysis, strand-specific quantification, circular insert-size validation, and integrated gene and operon quantification within a single framework.
+### Gene Quantification
+
+* Read and fragment counting from coordinate-sorted BAM files
+* Accurate paired-end fragment reconstruction
+* Strand-specific counting
+* Automatic handling of overlapping paired reads
+* TPM and RPKM normalization
+* Quantification from one or multiple BAM files
+* Summary statistics for assigned, ambiguous, unmapped and unassigned fragments
+
+### Operon Inference
+
+* De novo operon prediction from RNA-seq alignments
+* Integrates genomic organization and transcriptional evidence
+* Uses intergenic distance, strand consistency, expression continuity and paired-end connectivity
+* Consensus operon detection across multiple samples
+* TSV and GFF output formats
+* Configurable confidence thresholds
+
+### General
+
+* Pure Python implementation
+* Minimal external dependencies
+* Modular architecture for extension and development
+* Command-line interface designed for reproducible analyses
 
 ---
 
-## Installation
+# Why BOTAS?
 
-### Install from PyPI
+Most RNA-seq analysis workflows were originally developed for eukaryotic transcriptomes and therefore emphasize splice-aware alignment, exon structure and transcript reconstruction. Bacterial transcriptomes differ fundamentally because genes are densely organized, transcription frequently occurs as polycistronic operons, chromosomes are commonly circular, and strand-specific transcription is often essential for accurate expression analysis.
+
+BOTAS addresses these challenges through a workflow developed specifically for bacterial RNA-seq. Alignment, quantification and operon inference are performed within a single framework, eliminating the need to combine multiple independent tools while maintaining transparent and reproducible analyses.
+
+---
+
+# Installation
+
+## Install from PyPI
 
 ```bash
-pip install botas
+pip install botas-rnaseq
 ```
 
-### Install the latest development version
+The installed command-line program is:
+
+```bash
+botas
+```
+
+## Install the latest development version
 
 ```bash
 pip install git+https://github.com/clabe-wekesa/botas.git
 ```
 
-### Install from source
+## Install from source
 
 ```bash
 git clone https://github.com/clabe-wekesa/botas.git
@@ -58,7 +84,7 @@ cd botas
 pip install .
 ```
 
-### Development installation
+## Development installation
 
 ```bash
 pip install -e ".[dev]"
@@ -66,9 +92,9 @@ pip install -e ".[dev]"
 
 ---
 
-## Quick Start
+# Quick Start
 
-### Paired-end alignment
+## Align paired-end reads
 
 ```bash
 botas align \
@@ -78,7 +104,7 @@ botas align \
     -o aligned.bam
 ```
 
-### Single-end alignment
+## Align single-end reads
 
 ```bash
 botas align \
@@ -87,7 +113,7 @@ botas align \
     -o aligned.bam
 ```
 
-### Gene quantification
+## Quantify gene expression
 
 ```bash
 botas quantify \
@@ -96,15 +122,9 @@ botas quantify \
     -o gene_counts.tsv
 ```
 
-Supported features include:
+BOTAS reports raw gene counts together with normalized expression estimates and fragment assignment statistics.
 
-- Strand-specific counting
-- MAPQ filtering
-- Multi-mapper handling
-- TPM and RPKM calculation
-- Multi-BAM count matrix generation
-
-### Operon inference
+## Infer operons
 
 ```bash
 botas getOperons \
@@ -113,98 +133,66 @@ botas getOperons \
     -o operons.tsv
 ```
 
-Operon inference integrates:
-
-- Intergenic distance
-- Strand consistency
-- Coverage similarity
-- Paired-end support
-- Consensus-based merging
+Operons may also be exported directly as GFF annotations for downstream genome browsers and comparative analyses.
 
 ---
 
-## Architecture
+# Project Structure
 
 ```text
 botas/
-├── cli/          # Command-line interface
-├── core/         # Alignment engine
-├── data/         # Reference resources
-├── io/           # FASTQ, BAM and reference handling
-├── operons/      # Operon inference
-├── quantify/     # Gene and operon quantification
-└── rrna/         # rRNA detection and filtering
+├── cli/          Command-line interface
+├── core/         Alignment engine
+├── data/         Internal reference resources
+├── io/           FASTA, FASTQ and BAM utilities
+├── operons/      Operon inference
+├── quantify/     Gene quantification
+└── rrna/         rRNA filtering
 ```
 
-The alignment engine implements:
+---
 
-- K-mer indexing
-- Seed clustering
-- Edit-distance extension using edlib
-- CIGAR reconstruction
-- Mapping quality estimation
-- Circular coordinate normalization
+# Requirements
+
+* Python 3.10 or newer
+* pysam
+* edlib
+* biopython
+
+Optional:
+
+* tqdm (progress reporting)
 
 ---
 
-## Design Principles
-
-BOTAS is designed to provide:
-
-- Accurate bacterial RNA-seq alignment
-- Native support for circular genomes
-- Reproducible gene and operon quantification
-- Transparent and interpretable alignment scoring
-- Modular architecture for method development and extension
-- Integration of alignment and operon-level analyses within a unified workflow
-
----
-
-## Requirements
-
-### Required
-
-- Python ≥ 3.10
-- pysam
-- edlib
-- biopython
-
-### Optional
-
-- tqdm (progress display)
-
----
-
-## Documentation
-
-Command-line help is available through:
+# Documentation
 
 ```bash
 botas --help
 botas align --help
-botas quant --help
+botas quantify --help
 botas getOperons --help
 ```
 
 ---
 
-## Citation
+# Citation
 
-If you use BOTAS in your research, please cite:
+If you use BOTAS in published research, please cite:
 
-> Wekesa, C. S. *BOTAS: Bacterial Operon-Aware Transcriptome Alignment System.*
+> Wekesa, C. S. **BOTAS: Bacterial Operon-Aware Transcriptome Alignment System.**
 
 Citation details will be updated following publication.
 
 ---
 
-## License
+# License
 
-BOTAS is distributed under the MIT License. See the `LICENSE` file for details.
+BOTAS is distributed under the MIT License.
 
 ---
 
-## Author
+# Author
 
 **Clabe Simiyu Wekesa**
 
