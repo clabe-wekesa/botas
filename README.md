@@ -64,12 +64,6 @@ BOTAS addresses these challenges through a workflow developed specifically for b
 pip install botas-rnaseq
 ```
 
-The installed command-line program is:
-
-```bash
-botas
-```
-
 ## Install the latest development version
 
 ```bash
