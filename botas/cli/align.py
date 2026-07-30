@@ -348,7 +348,7 @@ def add_align_args(al: argparse.ArgumentParser) -> None:
     # =========================================================
     io0 = al.add_argument_group("Input / Output")
     io0.add_argument("-r", "--ref", required=False, metavar="FASTA", help="Reference FASTA file. Required unless --index is provided.")
-    io0.add_argument("--index", default=None, metavar="BOTAS_IDX", help="BOTAS-native reference index file produced by 'botas index'.")
+    io0.add_argument("-x" ,"--index", default=None, metavar="BOTAS_IDX", help="BOTAS-native reference index file produced by 'botas index'.")
     io0.add_argument("-o", "--out", required=True, metavar="BAM", help="Output BAM file (overwritten if it exists).")
 
     # =========================================================
