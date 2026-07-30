@@ -90,7 +90,6 @@ pip install .
 ```bash
 pip install -e ".[dev]"
 ```
-
 ---
 
 # Workflow
@@ -127,18 +126,13 @@ botas quantify   botas getOperons
 ## 1. Build a reference index
 
 ```bash
-botas index \
-    -r reference.fasta \
-    -o reference.botas.idx
+botas index -r reference.fasta -o reference.botas.idx
 ```
 
 For circular bacterial genomes:
 
 ```bash
-botas index \
-    -r reference.fasta \
-    -o reference.botas.idx \
-    --circular
+botas index -r reference.fasta -o reference.botas.idx --circular
 ```
 
 ---
@@ -148,20 +142,13 @@ botas index \
 ### Paired-end
 
 ```bash
-botas align \
-    -x reference.botas.idx \
-    -1 reads_R1.fastq.gz \
-    -2 reads_R2.fastq.gz \
-    --sort-bam
+botas align -x reference.botas.idx -1 reads_R1.fastq.gz -2 reads_R2.fastq.gz --sort-bam
 ```
 
 ### Single-end
 
 ```bash
-botas align \
-    -x reference.botas.idx \
-    -U reads.fastq.gz \
-    --sort-bam
+botas align -x reference.botas.idx -U reads.fastq.gz --sort-bam
 ```
 
 BOTAS automatically creates a project directory containing intermediate files, logs and final alignment results.
@@ -171,11 +158,7 @@ BOTAS automatically creates a project directory containing intermediate files, l
 ## 3. Quantify gene expression
 
 ```bash
-botas quantify \
-    -b alignment.bam \
-    -g annotation.gff \
-    --feature-type gene \
-    --gff-gene-attribute locus_tag
+botas quantify -b alignment.bam -g annotation.gff --feature-type gene --gff-gene-attribute locus_tag
 ```
 
 BOTAS reports
@@ -191,9 +174,7 @@ BOTAS reports
 ## 4. Infer operons
 
 ```bash
-botas getOperons \
-    -b alignment.bam \
-    -g annotation.gff
+botas getOperons -b alignment.bam -g annotation.gff
 ```
 
 Predicted operons are exported as
