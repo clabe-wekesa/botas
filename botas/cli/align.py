@@ -265,7 +265,7 @@ def build_root_parser() -> argparse.ArgumentParser:
     p = botasArgumentParser(
         prog="botas",
         description=(
-            "BOTAS — a seed-and-extend aligner optimized for bacterial genomes, "
+            "BOTAS is a seed and extend aligner optimized for bacterial genomes, "
             "with native support for circular chromosomes and plasmids."
         ),
         formatter_class=CleanHelpFormatter,

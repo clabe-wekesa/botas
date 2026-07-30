@@ -1,5 +1,6 @@
 import argparse
 import pysam
+from pathlib import Path
 from botas.operons.io import load_genes, compute_gene_coverage, operon_stats, write_operons_gff
 from botas.operons.merge import merge_pairs
 from botas.operons.features import operon_igds
@@ -50,17 +51,22 @@ def run_get_operons(args):
         raise ValueError("--threads must be at least 1")
 
     genes = load_genes(args.gff, feature_types=("gene",))
+
     # -------------------------------------------------
-    # Resolve output paths (prefix vs explicit output)
+    # Resolve output paths inside the BOTAS results dir
     # -------------------------------------------------
+    results_dir = Path(args._resultsdir)
+
     if args.prefix:
-        out_tsv = args.prefix + "_operons.tsv"
-        out_gff = args.prefix + "_operons.gff"
+        prefix_name = Path(args.prefix).name
+        out_tsv = results_dir / f"{prefix_name}_operons.tsv"
+        out_gff = results_dir / f"{prefix_name}_operons.gff"
     else:
-        out_tsv = args.out
-        out_gff = args.out + ".gff"
+        out_tsv = Path(args.out)
+        out_gff = out_tsv.with_suffix(out_tsv.suffix + ".gff")
 
     for bam in args.bam:
+
         try:
             with pysam.AlignmentFile(bam, "rb") as bf:
                 # minimal index check via pileup

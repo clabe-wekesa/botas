@@ -5,12 +5,7 @@ import argparse
 import logging
 
 from .core import quantify_bam
-from .io import (
-    compute_rpkm,
-    compute_tpm,
-    write_gene_counts_tsv,
-    write_operon_counts_tsv,
-)
+from .io import compute_rpkm, compute_tpm, write_gene_counts_tsv, write_operon_counts_tsv
 
 QUANTIFY_EPILOG = """
 Examples
