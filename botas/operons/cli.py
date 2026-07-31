@@ -187,7 +187,7 @@ def add_operon_args(p: argparse.ArgumentParser) -> None:
     io.add_argument("--gff","-g", required=True, metavar="GFF",
         help="Genome annotation in GFF3 format (gene features required).")
 
-    io.add_argument("--out","-o", required=True, metavar="TSV",
+    io.add_argument("--out","-o", required=False, metavar="TSV",
         help="Output TSV file containing predicted operons.")
 
     io.add_argument("--threads", "-t", type=int, default=1, metavar="INT",

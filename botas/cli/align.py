@@ -5,31 +5,28 @@ from __future__ import annotations
 
 import argparse
 import logging
+import re
 import sys
-import pysam
-from pathlib import Path
 from dataclasses import replace
+from pathlib import Path
+import pysam
 from importlib.metadata import PackageNotFoundError, version
-from botas.operons.cli import add_operon_args
+
 from botas.core.align_core import align_read
+from botas.core.botas_index import BOTAS_INDEX_SUFFIX, BotasIntIndexAdapter, build_botas_index, load_botas_index, save_botas_index
 from botas.core.parallel_context import PEContext
-from botas.core.pe_pool import align_paired_pool
-from botas.core.se_pool import align_single_pool
+from botas.core.pe_pool import _normalize_circular_hit, align_paired_pool
 from botas.core.ref_index import KmerIndex
+from botas.core.se_pool import align_single_pool
 from botas.io.bam_writer import open_bam_writer, write_hit, write_pair, write_unmapped
 from botas.io.fastq import read_fastq
 from botas.io.reference_set import load_reference_set
-from botas.operons.cli import run_get_operons
-from botas.quantify.cli import add_quantify_args
+from botas.operons.cli import GETOPERONS_EPILOG, add_operon_args, run_get_operons
 from botas.io.workdir import init_workdir, update_manifest
-from botas.operons.cli import GETOPERONS_EPILOG
-from botas.quantify.cli import QUANTIFY_EPILOG
-from botas.rrna.rrna import load_rrna_kmers, is_rrna_like
+from botas.quantify.cli import QUANTIFY_EPILOG, add_quantify_args
+from botas.core.utils import normalize_read_name
 from botas.rrna.db import get_default_rrna_db
-from botas.core.utils import normalize_read_name  # FIX: use fast name splitter
-from botas.core.botas_index import build_botas_index, save_botas_index, default_index_path, BOTAS_INDEX_SUFFIX
-from botas.core.botas_index import load_botas_index, BotasIntIndexAdapter
-from botas.core.pe_pool import _normalize_circular_hit
+from botas.rrna.rrna import is_rrna_like, load_rrna_kmers
 
 
 ALIGN_EPILOG = """
@@ -54,12 +51,43 @@ Notes
 -----
 - Either --fq (single-end) OR (--fq1, --fq2) (paired-end) must be provided.
 - Circular alignment enables correct handling of reads spanning the origin.
-- Output BAM files are coordinate-sorted and suitable for downstream analysis.
+- Use --sort-bam to produce a coordinate-sorted BAM and its .bai index.
 """
 
 
+def _strip_bam_suffix(path: str) -> str:
+    """Return a BAM filename without the .bam or .sorted.bam suffix."""
+    name = Path(path).name
+    lower_name = name.lower()
+
+    if lower_name.endswith(".sorted.bam"):
+        return name[: -len(".sorted.bam")]
+    if lower_name.endswith(".bam"):
+        return name[: -len(".bam")]
+
+    return name
+
+
+def default_alignment_name(read_path: str | None) -> str:
+    """Derive a BAM filename from a single-end or read-1 FASTQ path."""
+    if read_path is None:
+        return "aligned.bam"
+
+    name = Path(read_path).name
+    name = re.sub(r"\.(fastq|fq)(\.gz)?$", "", name, flags=re.IGNORECASE)
+    name = re.sub(r"[._-]R?1$", "", name, flags=re.IGNORECASE)
+    return f"{name}.bam"
+
+
+def ensure_suffix(path: str, suffix: str) -> str:
+    """Append the expected suffix unless it is already present."""
+    if path.lower().endswith(suffix.lower()):
+        return path
+    return f"{path}{suffix}"
+
+
 # ----------------------------
-# Version / banner
+# Version
 # ----------------------------
 
 def get_botas_version() -> str:
@@ -67,24 +95,6 @@ def get_botas_version() -> str:
         return version("botas-rnaseq")
     except PackageNotFoundError:
         return "unknown"
-
-
-def botas_banner() -> None:
-    CYAN = "\033[96m"
-    GREEN = "\033[92m"
-    YELLOW = "\033[93m"
-    RESET = "\033[0m"
-    BOLD = "\033[1m"
-
-    banner = f"""
-{CYAN}=================================================================={RESET}
-{BOLD}{GREEN}                           BOTAS v{get_botas_version()}{RESET}
-{YELLOW}              Bacterial Operon-aware Transcriptome Aligner Software{RESET}
-{BOLD}{GREEN}      Developed by Dr. Clabe Wekesa at the MPI-CE (Jena, Germany){RESET}
-{GREEN}               in Dr. Axel Mithöfer's lab{RESET}
-{CYAN}=================================================================={RESET}
-"""
-    print(banner)
 
 
 # ----------------------------
@@ -153,18 +163,11 @@ class CleanHelpFormatter(argparse.RawTextHelpFormatter):
 
         return parts
 
+
 def add_index_args(p: argparse.ArgumentParser) -> None:
     io = p.add_argument_group("Input / Output")
-    io.add_argument(
-        "-r", "--ref",
-        required=True,
-        metavar="FASTA",
-        help="Reference FASTA file to index.",
-    )
-    io.add_argument(
-        "-o", "--out",
-        default=None,
-        metavar="INDEX",
+    io.add_argument("-r", "--ref", required=True, metavar="FASTA", help="Reference FASTA file to index.")
+    io.add_argument("-o", "--out", default=None, metavar="INDEX",
         help=(
             "Output BOTAS index file. "
             f"If omitted, BOTAS writes <reference>{BOTAS_INDEX_SUFFIX}."
@@ -172,37 +175,11 @@ def add_index_args(p: argparse.ArgumentParser) -> None:
     )
 
     idx = p.add_argument_group("Index parameters")
-    idx.add_argument(
-        "-k", "--kmer",
-        type=int,
-        default=15,
-        metavar="INT",
-        help="K-mer size used for BOTAS seed indexing. Default: 15.",
-    )
-    idx.add_argument(
-        "-w", "--window",
-        type=int,
-        default=10,
-        metavar="INT",
-        help="Minimizer window size. Default: 10.",
-    )
-    idx.add_argument(
-        "--circular",
-        action="store_true",
-        help="Treat all contigs as circular while building the index.",
-    )
-    idx.add_argument(
-        "--circular-contigs",
-        default=None,
-        metavar="LIST",
-        help="Comma-separated list of contig names to treat as circular.",
-    )
-
-    idx.add_argument(
-        "--circular-overhang-percent",
-        type=int,
-        default=5,
-        metavar="0-50",
+    idx.add_argument("-k", "--kmer", type=int, default=15, metavar="INT", help="K-mer size used for BOTAS seed indexing. Default: 15.")
+    idx.add_argument("-w", "--window", type=int, default=10, metavar="INT", help="Minimizer window size. Default: 10.")
+    idx.add_argument("-c", "--circular", action="store_true", help="Treat all contigs as circular while building the index.")
+    idx.add_argument("-n","--circular-contigs", default=None, metavar="LIST", help="Comma-separated list of contig names to treat as circular.")
+    idx.add_argument("--circular-overhang-percent", type=int, default=5, metavar="0-50",
         help=(
             "Percent of each circular contig end to append as overhang. "
             "0=no circular padding. "
@@ -224,7 +201,7 @@ def run_index(args: argparse.Namespace) -> int:
             if x.strip()
         ]
 
-    out = args.out or default_index_path(args.ref)
+    out = args.out
 
     idx = build_botas_index(
         args.ref,
@@ -260,6 +237,7 @@ def run_index(args: argparse.Namespace) -> int:
 
     return 0
 
+
 def build_root_parser() -> argparse.ArgumentParser:
 
     p = botasArgumentParser(
@@ -272,26 +250,16 @@ def build_root_parser() -> argparse.ArgumentParser:
         allow_abbrev=False,
     )
 
-    p.add_argument(
-        "--dir", "-d",
-        dest="workdir",
-        default=None,
-        metavar="DIR",
-        help=(
-            "BOTAS working directory. "
-            "If omitted, a directory is auto-created "
-            "(e.g. botas_outdir/ or botas_run_YYYYmmdd_HHMMSS)."
-        ),
-    )
+    p.add_argument("-d", "-dir", dest="workdir", default=None, metavar="DIR", help=("BOTAS working directory."))
 
-    p.add_argument("--version", action="version", version=f"BOTAS v{get_botas_version()}", help="Print version and exit.")
+    p.add_argument("-v","--version", action="version", version=f"BOTAS v{get_botas_version()}", help="Print version and exit.")
 
     sub = p.add_subparsers(dest="command", metavar="<command>", required=True)
 
     # ---------------- index ----------------
     index_p = sub.add_parser(
         "index",
-        help="Build a BOTAS-native reference index",
+        help="Build BOTAS index",
         description=(
             "Build a BOTAS-native seed index for bacterial genomes. "
             "The output file uses the suffix .botas.idx."
@@ -349,7 +317,7 @@ def add_align_args(al: argparse.ArgumentParser) -> None:
     io0 = al.add_argument_group("Input / Output")
     io0.add_argument("-r", "--ref", required=False, metavar="FASTA", help="Reference FASTA file. Required unless --index is provided.")
     io0.add_argument("-x" ,"--index", default=None, metavar="BOTAS_IDX", help="BOTAS-native reference index file produced by 'botas index'.")
-    io0.add_argument("-o", "--out", required=True, metavar="BAM", help="Output BAM file (overwritten if it exists).")
+    io0.add_argument("-o", "--out", required=False, metavar="BAM", help="Output BAM file (overwritten if it exists).")
 
     # =========================================================
     # Read input
@@ -410,7 +378,7 @@ def add_align_args(al: argparse.ArgumentParser) -> None:
     perf = al.add_argument_group("Performance")
     perf.add_argument("-t", "--threads", type=int, default=1, help="Number of worker processes (default: 1).")
     perf.add_argument("--pool", action="store_true", help="Use multiprocessing pool for alignment.")
-    perf.add_argument("--chunk-size", type=int, default=2000, help="Chunk size per task when using --pool (default: 2000).")
+    perf.add_argument("--chunk-size", type=int, default=10000, help="Chunk size per task when using --pool (default: 10000).")
 
     # =========================================================
     # BAM post-processing
@@ -429,9 +397,9 @@ def add_align_args(al: argparse.ArgumentParser) -> None:
                       help=("rRNA reference FASTA (.fa or .fa.gz). "
                             "If not provided, a curated bundled database is used."))
     rrna.add_argument("--rrna-k", type=int, default=18, metavar="K",
-                      help="k-mer size for rRNA detection (default: 17).")
+                      help="k-mer size for rRNA detection (default: 18).")
     rrna.add_argument("--rrna-min-hits", type=int, default=50, metavar="N",
-                      help="Minimum shared rRNA k-mers to classify as rRNA (default: 3).")
+                      help="Minimum shared rRNA k-mers to classify as rRNA (default: 50).")
 
     # =========================================================
     # Logging
@@ -482,10 +450,6 @@ def run_align(args) -> int:
     if (args.fq1 and not args.fq2) or (args.fq2 and not args.fq1):
         log.error("Paired-end requires both --fq1 and --fq2.")
         return 2
-
-    # 3) Banner
-    if log.isEnabledFor(logging.INFO):
-        botas_banner()
 
     # 4) Load reference/index
     using_botas_index = args.index is not None
@@ -802,6 +766,61 @@ def main(argv: list[str] | None = None) -> int:
 
     parser = build_root_parser()
     args = parser.parse_args(argv)
+
+    # -------------------------------------------------
+    # Resolve default output names
+    # -------------------------------------------------
+    if hasattr(args, "out") and args.out is None:
+        if args.command == "index":
+            args.out = f"{Path(args.ref).stem}{BOTAS_INDEX_SUFFIX}"
+
+        elif args.command == "align":
+            args.out = default_alignment_name(args.fq1 or args.fq)
+
+        elif args.command == "quantify":
+            name = _strip_bam_suffix(args.bam[0])
+
+            if len(args.bam) > 1:
+                if args.feature_type == "operon":
+                    args.out = f"{name}.operon_expression_matrix.tsv"
+                else:
+                    args.out = f"{name}.gene_expression_matrix.tsv"
+            elif args.feature_type == "operon":
+                args.out = f"{name}.operon_counts.tsv"
+            else:
+                args.out = f"{name}.gene_counts.tsv"
+
+        elif args.command == "getOperons":
+            name = _strip_bam_suffix(args.bam[0])
+            args.out = f"{name}.operons.tsv"
+
+    # -------------------------------------------------
+    # Ensure output file extensions
+    # -------------------------------------------------
+    if hasattr(args, "out") and args.out is not None:
+        if args.command == "index":
+            args.out = ensure_suffix(args.out, BOTAS_INDEX_SUFFIX)
+
+        elif args.command == "align":
+            args.out = ensure_suffix(args.out, ".bam")
+
+        elif args.command == "quantify":
+            if len(args.bam) > 1:
+                suffix = (
+                    ".operon_expression_matrix.tsv"
+                    if args.feature_type == "operon"
+                    else ".gene_expression_matrix.tsv"
+                )
+            else:
+                suffix = (
+                    ".operon_counts.tsv"
+                    if args.feature_type == "operon"
+                    else ".gene_counts.tsv"
+                )
+            args.out = ensure_suffix(args.out, suffix)
+
+        elif args.command == "getOperons":
+            args.out = ensure_suffix(args.out, ".operons.tsv")
 
     # -------------------------------------------------
     # Initialize BOTAS working directory
