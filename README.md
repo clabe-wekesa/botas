@@ -436,4 +436,4 @@ BOTAS is distributed under the MIT License.
 
 **Clabe Simiyu Wekesa**
 
-GitHub: https://github.com/clabe-wekesa
+GitHub: https://github.com/clabe-wekesa/botas
