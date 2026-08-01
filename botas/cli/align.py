@@ -708,6 +708,7 @@ def run_align(args) -> int:
                         strand=best_hit.strand,
                         nm=-best_hit.ascore,
                         ascore=best_hit.ascore,
+                        junction=getattr(best_hit, "junction", False),
                     )
 
                 if (idx + 1) % 10000 == 0:

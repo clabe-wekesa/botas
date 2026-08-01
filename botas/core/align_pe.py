@@ -4,6 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 import logging
+import re
 
 from botas.core.slice import slice_reference
 from botas.core.align_core import Hit, align_read
@@ -17,6 +18,32 @@ from botas.core.edlib_utils import edlib_align_hw_locations, edlib_get_cigar
 from botas.core.pairing import is_proper_pair_unified
 
 logger = logging.getLogger(__name__)
+
+_CIGAR_RE = re.compile(r"(\d+)([MIDNSHP=X])")
+
+
+def _reference_span(cigar: str) -> int:
+    return sum(
+        int(length)
+        for length, operation in _CIGAR_RE.findall(cigar)
+        if operation in ("M", "D", "N", "=", "X")
+    )
+
+
+def _crosses_padded_origin(
+    pos0: int,
+    cigar: str,
+    original_len: int,
+    circular_overhang: int,
+) -> bool:
+    """Return whether an alignment on a padded reference crosses an origin."""
+    end0 = int(pos0) + _reference_span(cigar)
+    left_origin = int(circular_overhang)
+    right_origin = left_origin + int(original_len)
+    return (
+        int(pos0) < left_origin < end0
+        or int(pos0) < right_origin < end0
+    )
 
 
 @dataclass(frozen=True)
@@ -147,6 +174,10 @@ def rescue_mate(
         cigar=cigar,
         ascore=-edits,
         mapq=min(60, 30 + max(0, 30 - edits)),
+        junction=(
+            circular
+            and int(pos0) + _reference_span(cigar) > L
+        ),
     )
 
 
@@ -223,11 +254,18 @@ def align_pair_simple(
             cigar=hit2_rev.cigar,
             ascore=hit2_rev.ascore,
             mapq=hit2_rev.mapq,
+            junction=hit2_rev.junction,
         )
 
     def _norm_hit(hit):
         if hit is None or not circular:
             return hit
+        junction = _crosses_padded_origin(
+            hit.pos0,
+            hit.cigar,
+            L,
+            circular_overhang,
+        )
         return Hit(
             rname=hit.rname,
             pos0=(int(hit.pos0) - int(circular_overhang)) % L,
@@ -235,6 +273,7 @@ def align_pair_simple(
             cigar=hit.cigar,
             ascore=hit.ascore,
             mapq=hit.mapq,
+            junction=junction,
         )
 
     hit1 = _norm_hit(hit1)
@@ -350,6 +389,7 @@ def align_pair_simple(
                 cigar=hit1.cigar,
                 ascore=hit1.ascore,
                 mapq=hit1.mapq,
+                junction=hit1.junction,
             )
 
         if hit2 and hit2.pos0 >= L:
@@ -360,6 +400,7 @@ def align_pair_simple(
                 cigar=hit2.cigar,
                 ascore=hit2.ascore,
                 mapq=hit2.mapq,
+                junction=hit2.junction,
             )
 
     if hit1 and hit2:

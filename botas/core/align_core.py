@@ -38,6 +38,7 @@ class Hit:
     cigar: str
     ascore: int
     mapq: int
+    junction: bool = False
 
 
 @dataclass(frozen=True)

@@ -100,6 +100,7 @@ def write_hit(
     strand: str,
     nm: int,
     ascore: int,
+    junction: bool = False,
 ) -> None:
     """
     Write a mapped single-end read.
@@ -128,6 +129,8 @@ def write_hit(
 
     a.set_tag("NM", int(nm), value_type="i")
     a.set_tag("AS", int(ascore), value_type="i")
+    if junction:
+        a.set_tag("XC", "JUNCTION", value_type="Z")
 
     bw.out.write(a)
 
@@ -226,6 +229,8 @@ def write_pair(
             a.cigarstring = hit.cigar
             a.set_tag("NM", int(-hit.ascore), value_type="i")
             a.set_tag("AS", int(hit.ascore), value_type="i")
+            if getattr(hit, "junction", False):
+                a.set_tag("XC", "JUNCTION", value_type="Z")
 
         if mate_hit is None:
             a.next_reference_id = -1

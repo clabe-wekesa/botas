@@ -6,6 +6,7 @@ import logging
 from botas.io.reference_set import load_reference_set
 from botas.core.ref_index import KmerIndex
 from botas.core.align_pe import align_pair
+from botas.io.bam_writer import ref_aligned_length
 from botas.core.align_core import Hit
 from botas.core.parallel_context import PEContext
 from botas.core.utils import chunked
@@ -127,6 +128,11 @@ def _normalize_circular_hit(hit, contig):
     overhang = getattr(contig, "circular_overhang", 0) or 0
 
     pos0 = (int(hit.pos0) - int(overhang)) % int(orig_len)
+    end0 = int(hit.pos0) + ref_aligned_length(hit.cigar)
+    junction = (
+        int(hit.pos0) < int(overhang) < end0
+        or int(hit.pos0) < int(overhang) + int(orig_len) < end0
+    )
 
     return Hit(
         rname=hit.rname,
@@ -135,6 +141,7 @@ def _normalize_circular_hit(hit, contig):
         cigar=hit.cigar,
         ascore=hit.ascore,
         mapq=hit.mapq,
+        junction=junction,
     )
 
 
