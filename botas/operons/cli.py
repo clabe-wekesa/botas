@@ -24,9 +24,9 @@ Notes
 - Genes are linked into operons if they are on the same strand,
   separated by at most --max-igd base pairs, and show compatible
   RNA-seq coverage profiles.
-- When multiple BAM files are provided, consensus operons are
-  constructed by retaining gene pairs supported in at least
-  --min-support fraction of samples.
+- Multiple BAM files produce one independent result per BAM by default.
+- With --consensus, one consensus result is constructed by retaining
+  gene pairs supported in at least --min-support fraction of BAM files.
 """
 
 def _directons(genes):
@@ -46,24 +46,146 @@ def _directons(genes):
     return directons
 
 
+def _bam_name(bam_path):
+    """Return a stable sample name for a BAM, including sorted BAMs."""
+    name = Path(bam_path).name
+    lower_name = name.lower()
+
+    if lower_name.endswith(".sorted.bam"):
+        return name[: -len(".sorted.bam")]
+    if lower_name.endswith(".bam"):
+        return name[: -len(".bam")]
+    return Path(name).stem
+
+
+def _gff_path(out_tsv):
+    """Return the matching .gff path without producing .tsv.gff."""
+    out_tsv = Path(out_tsv)
+    if out_tsv.name.lower().endswith(".tsv"):
+        return out_tsv.with_name(out_tsv.name[:-4] + ".gff")
+    return out_tsv.with_suffix(out_tsv.suffix + ".gff")
+
+
+def _output_paths(args, bam=None, multiple=False, consensus=False):
+    """Resolve unambiguous output paths for one inference result."""
+    results_dir = Path(args._resultsdir)
+
+    if consensus:
+        if args.prefix:
+            base = Path(args.prefix).name
+            out_tsv = results_dir / f"{base}_operons.tsv"
+        else:
+            out_tsv = Path(args.out)
+        return out_tsv, _gff_path(out_tsv)
+
+    if multiple:
+        sample = _bam_name(bam)
+        if args.prefix:
+            out_tsv = results_dir / f"{Path(args.prefix).name}_{sample}_operons.tsv"
+        else:
+            out_tsv = results_dir / f"{sample}.operons.tsv"
+        return out_tsv, _gff_path(out_tsv)
+
+    if args.prefix:
+        out_tsv = results_dir / f"{Path(args.prefix).name}_operons.tsv"
+    else:
+        out_tsv = Path(args.out)
+    return out_tsv, _gff_path(out_tsv)
+
+
+def _infer_from_coverage(directons, cov, args):
+    operons = []
+
+    for ds in directons:
+        if len(ds) == 1:
+            operons.append(ds)
+            continue
+
+        labels = [
+            same_operon(
+                g1,
+                g2,
+                cov,
+                max_igd=args.max_igd,
+                min_coverage=args.min_coverage,
+                min_cov_ratio=args.min_cov_ratio,
+            )
+            for g1, g2 in zip(ds[:-1], ds[1:])
+        ]
+        operons.extend(merge_pairs(ds, labels))
+
+    return operons
+
+
+def _write_operons(args, out_tsv, out_gff, operons, cov, consensus=False):
+    retained_operons = []
+    column_prefix = "consensus_" if consensus else ""
+
+    with open(out_tsv, "w", encoding="utf-8") as out:
+        out.write(
+            "operon_id\tchrom\tstrand\tstart\tend\tn_genes\tgene_ids\tigds\t"
+            f"{column_prefix}mean_coverage\t{column_prefix}min_coverage\t"
+            f"{column_prefix}coverage_cv\t{column_prefix}score\t"
+            f"{column_prefix}confidence\n"
+        )
+
+        for op in operons:
+            chrom = op[0]["chrom"]
+            strand = op[0]["strand"]
+            start = min(g["start"] for g in op)
+            end = max(g["end"] for g in op)
+            ids = ",".join(g["id"] for g in op)
+
+            igds = operon_igds(op)
+            mean_cov, min_cov, cv = operon_stats(op, cov)
+            score = operon_score(igds, mean_cov, min_cov, cv, args.max_igd)
+
+            if score < args.min_score:
+                continue
+
+            retained_operons.append(op)
+            operon_id = len(retained_operons)
+            conf = operon_confidence(score)
+
+            out.write(
+                f"operon_{operon_id}\t{chrom}\t{strand}\t{start}\t{end}\t"
+                f"{len(op)}\t{ids}\t{','.join(map(str, igds))}\t"
+                f"{mean_cov:.3f}\t{min_cov:.3f}\t{cv:.3f}\t"
+                f"{score:.3f}\t{conf}\n"
+            )
+
+    print(f"[getOperons] wrote {out_tsv}")
+
+    if args.write_gff:
+        write_operons_gff(
+            out_gff,
+            retained_operons,
+            cov,
+            args.max_igd,
+            attribute_prefix=column_prefix,
+        )
+        print(f"[getOperons] wrote {out_gff}")
+
+
 def run_get_operons(args):
     if args.threads < 1:
         raise ValueError("--threads must be at least 1")
 
+    if (
+        len(args.bam) > 1
+        and not args.consensus
+        and getattr(args, "_out_explicit", False)
+    ):
+        raise SystemExit(
+            "[ERROR] --out names only one file, but multiple BAM files "
+            "produce separate non-consensus results. Use --prefix instead, "
+            "or run one BAM at a time."
+        )
+
+    if not 0.0 <= args.min_support <= 1.0:
+        raise ValueError("--min-support must be between 0 and 1")
+
     genes = load_genes(args.gff, feature_types=("gene",))
-
-    # -------------------------------------------------
-    # Resolve output paths inside the BOTAS results dir
-    # -------------------------------------------------
-    results_dir = Path(args._resultsdir)
-
-    if args.prefix:
-        prefix_name = Path(args.prefix).name
-        out_tsv = results_dir / f"{prefix_name}_operons.tsv"
-        out_gff = results_dir / f"{prefix_name}_operons.gff"
-    else:
-        out_tsv = Path(args.out)
-        out_gff = out_tsv.with_suffix(out_tsv.suffix + ".gff")
 
     for bam in args.bam:
 
@@ -89,86 +211,51 @@ def run_get_operons(args):
     if not genes:
         raise ValueError("No genes loaded from GFF")
 
-    cov_by_bam = [compute_gene_coverage(bam, genes, max_workers=args.threads) for bam in args.bam]
+    cov_by_bam = [
+        compute_gene_coverage(bam, genes, max_workers=args.threads)
+        for bam in args.bam
+    ]
+    directons = _directons(genes)
 
     if args.consensus:
-        cov = {gene["id"]: sum(bam_cov.get(gene["id"], 0.0) for bam_cov in cov_by_bam) / len(cov_by_bam)
+        cov = {
+            gene["id"]: sum(
+                bam_cov.get(gene["id"], 0.0) for bam_cov in cov_by_bam
+            )
+            / len(cov_by_bam)
             for gene in genes
         }
-    else:
-        cov = cov_by_bam[0]
-
-    directons = _directons(genes)
-    operons_all = []
-
-    if not args.consensus:
-        # single-BAM behavior (unchanged)
-        for ds in directons:
-            if len(ds) == 1:
-                operons_all.append(ds)
-                continue
-
-            labels = []
-            for g1, g2 in zip(ds[:-1], ds[1:]):
-                labels.append(
-                    same_operon(
-                        g1, g2, cov,
-                        max_igd=args.max_igd,
-                        min_coverage=args.min_coverage,
-                        min_cov_ratio=args.min_cov_ratio,
-                    )
-                )
-
-            operons_all.extend(merge_pairs(ds, labels))
-
-    else:
-        # multi-BAM consensus
         pair_support = build_pair_support(directons, cov_by_bam, args)
-
+        operons_all = []
         for ds in directons:
             operons_all.extend(
                 merge_by_support(ds, pair_support, args.min_support)
             )
-
-    retained_operons = []
-
-    with open(out_tsv, "w", encoding="utf-8") as out:
-        out.write(
-            "operon_id\tchrom\tstrand\tstart\tend\tn_genes\tgene_ids\tigds\t"
-            "mean_coverage\tmin_coverage\tcoverage_cv\tscore\tconfidence\n"
-        )
-
-        for op in operons_all:
-            chrom = op[0]["chrom"]
-            strand = op[0]["strand"]
-            start = min(g["start"] for g in op)
-            end = max(g["end"] for g in op)
-            ids = ",".join(g["id"] for g in op)
-
-            igds = operon_igds(op)
-            mean_cov, min_cov, cv = operon_stats(op, cov)
-            score = operon_score(igds, mean_cov, min_cov, cv, args.max_igd)
-
-            if score < args.min_score:
-                continue
-
-            retained_operons.append(op)
-            operon_id = len(retained_operons)
-            conf = operon_confidence(score)
-
-            out.write(
-                f"operon_{operon_id}\t{chrom}\t{strand}\t{start}\t{end}\t"
-                f"{len(op)}\t{ids}\t{','.join(map(str, igds))}\t"
-                f"{mean_cov:.3f}\t{min_cov:.3f}\t{cv:.3f}\t"
-                f"{score:.3f}\t{conf}\n"
-            )
-
-    if args.write_gff:
-        write_operons_gff(
+        out_tsv, out_gff = _output_paths(args, consensus=True)
+        _write_operons(
+            args,
+            out_tsv,
             out_gff,
-            retained_operons,
+            operons_all,
             cov,
-            args.max_igd,
+            consensus=True,
+        )
+        return
+
+    multiple = len(args.bam) > 1
+    for bam, cov in zip(args.bam, cov_by_bam):
+        operons_all = _infer_from_coverage(directons, cov, args)
+        out_tsv, out_gff = _output_paths(
+            args,
+            bam=bam,
+            multiple=multiple,
+        )
+        _write_operons(
+            args,
+            out_tsv,
+            out_gff,
+            operons_all,
+            cov,
         )
 
 
@@ -188,7 +275,10 @@ def add_operon_args(p: argparse.ArgumentParser) -> None:
         help="Genome annotation in GFF3 format (gene features required).")
 
     io.add_argument("--out","-o", required=False, metavar="TSV",
-        help="Output TSV file containing predicted operons.")
+        help=(
+            "Output TSV file containing predicted operons. Valid for a "
+            "single BAM or a consensus result; use --prefix for separate "
+            "results from multiple BAM files."))
 
     io.add_argument("--threads", "-t", type=int, default=1, metavar="INT",
         help=(
@@ -257,6 +347,5 @@ def add_operon_args(p: argparse.ArgumentParser) -> None:
 
     out.add_argument("--prefix", default=None,
         help=(
-            "Optional output prefix. "
-            "If provided, multiple output files may be generated "
-            "(e.g. prefix.operons.tsv, prefix.operons.gff)."))
+            "Optional output prefix. With multiple BAM files and no "
+            "--consensus, the BAM sample name is appended to each output."))

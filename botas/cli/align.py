@@ -767,6 +767,7 @@ def main(argv: list[str] | None = None) -> int:
 
     parser = build_root_parser()
     args = parser.parse_args(argv)
+    args._out_explicit = hasattr(args, "out") and args.out is not None
 
     # -------------------------------------------------
     # Resolve default output names
@@ -792,7 +793,7 @@ def main(argv: list[str] | None = None) -> int:
                 args.out = f"{name}.gene_counts.tsv"
 
         elif args.command == "getOperons":
-            name = _strip_bam_suffix(args.bam[0])
+            name = "consensus" if args.consensus else _strip_bam_suffix(args.bam[0])
             args.out = f"{name}.operons.tsv"
 
     # -------------------------------------------------

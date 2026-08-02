@@ -216,7 +216,13 @@ def operon_stats(genes, cov):
     return mean, mn, cv
 
 
-def write_operons_gff(path, operons, cov, max_igd):
+def write_operons_gff(
+    path,
+    operons,
+    cov,
+    max_igd,
+    attribute_prefix="",
+):
     from botas.operons.features import operon_igds
     from botas.operons.classifier import operon_score
 
@@ -237,9 +243,9 @@ def write_operons_gff(path, operons, cov, max_igd):
                 f"ID=operon_{i};"
                 f"n_genes={len(op)};"
                 f"genes={','.join(g['id'] for g in op)};"
-                f"mean_cov={mean_cov:.3f};"
-                f"score={score:.3f};"
-                f"confidence={conf}"
+                f"{attribute_prefix}mean_cov={mean_cov:.3f};"
+                f"{attribute_prefix}score={score:.3f};"
+                f"{attribute_prefix}confidence={conf}"
             )
 
             gff.write(
