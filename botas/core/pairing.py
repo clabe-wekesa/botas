@@ -137,6 +137,15 @@ def is_proper_pair_unified(
             tol_ins,
         )
 
+    return is_proper_pair_linear(
+        pos1,
+        strand1,
+        pos2,
+        strand2,
+        read_len,
+        max_insert,
+    )
+
 
 def compute_insert_size(
     *,
