@@ -40,6 +40,35 @@ def ref_aligned_length(cigar: str) -> int:
     return nref
 
 
+def pair_template_lengths(
+    *,
+    hit1,
+    hit2,
+    insert_size: int | None,
+) -> tuple[int, int]:
+    """Return reciprocal SAM TLEN values for a mapped pair.
+
+    Circular origin-crossing pairs have a small biological insert size but a
+    nearly genome-length linear coordinate span.  Prefer the insert size
+    computed by the pairing geometry; fall back to the outer linear span when
+    no usable insert size was supplied.
+    """
+    if hit1 is None or hit2 is None or hit1.rname != hit2.rname:
+        return 0, 0
+
+    span = int(insert_size or 0)
+    if span <= 0:
+        start1 = int(hit1.pos0)
+        end1 = start1 + ref_aligned_length(hit1.cigar)
+        start2 = int(hit2.pos0)
+        end2 = start2 + ref_aligned_length(hit2.cigar)
+        span = max(end1, end2) - min(start1, start2)
+
+    if int(hit1.pos0) <= int(hit2.pos0):
+        return span, -span
+    return -span, span
+
+
 @dataclass
 class BamWriter:
     out: pysam.AlignmentFile
@@ -56,6 +85,7 @@ def open_bam_writer(
     *,
     ref_names: list[str],
     ref_lengths: list[int],
+    mode: str = "wb",
 ) -> BamWriter:
     if len(ref_names) != len(ref_lengths):
         raise ValueError("ref_names and ref_lengths must match")
@@ -76,7 +106,10 @@ def open_bam_writer(
         ],
     }
 
-    bf = pysam.AlignmentFile(out_bam, "wb", header=header)
+    if mode not in ("wb", "wb0"):
+        raise ValueError("BAM writer mode must be 'wb' or 'wb0'")
+
+    bf = pysam.AlignmentFile(out_bam, mode, header=header)
     ref_id = {n: i for i, n in enumerate(ref_names)}
 
     return BamWriter(
@@ -184,6 +217,12 @@ def write_pair(
     this writer.
     """
 
+    tlen1, tlen2 = pair_template_lengths(
+        hit1=hit1,
+        hit2=hit2,
+        insert_size=insert_size,
+    )
+
     def _make(
         *,
         is_read1: bool,
@@ -191,6 +230,7 @@ def write_pair(
         qual: str,
         hit,
         mate_hit,
+        template_length: int,
     ) -> pysam.AlignedSegment:
         a = pysam.AlignedSegment(bw.out.header)
 
@@ -239,22 +279,7 @@ def write_pair(
             a.next_reference_id = bw.ref_id[mate_hit.rname]
             a.next_reference_start = int(mate_hit.pos0)
 
-        if hit is not None and mate_hit is not None:
-            start1 = int(hit.pos0)
-            end1 = start1 + ref_aligned_length(hit.cigar)
-            start2 = int(mate_hit.pos0)
-            end2 = start2 + ref_aligned_length(mate_hit.cigar)
-
-            left = min(start1, start2)
-            right = max(end1, end2)
-            tlen = right - left
-
-            if start1 == left:
-                a.template_length = int(tlen)
-            else:
-                a.template_length = -int(tlen)
-        else:
-            a.template_length = 0
+        a.template_length = int(template_length)
 
         return a
 
@@ -264,6 +289,7 @@ def write_pair(
         qual=r1_qual,
         hit=hit1,
         mate_hit=hit2,
+        template_length=tlen1,
     )
     a2 = _make(
         is_read1=False,
@@ -271,6 +297,7 @@ def write_pair(
         qual=r2_qual,
         hit=hit2,
         mate_hit=hit1,
+        template_length=tlen2,
     )
 
     bw.out.write(a1)

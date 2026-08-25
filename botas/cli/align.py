@@ -5,8 +5,10 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import re
 import sys
+import tempfile
 from dataclasses import replace
 from pathlib import Path
 import pysam
@@ -18,7 +20,7 @@ from botas.core.parallel_context import PEContext
 from botas.core.pe_pool import _normalize_circular_hit, align_paired_pool
 from botas.core.ref_index import KmerIndex
 from botas.core.se_pool import align_single_pool
-from botas.io.bam_writer import open_bam_writer, write_hit, write_pair, write_unmapped
+from botas.io.bam_writer import open_bam_writer, write_hit, write_unmapped
 from botas.io.fastq import read_fastq
 from botas.io.reference_set import load_reference_set
 from botas.operons.cli import GETOPERONS_EPILOG, add_operon_args, run_get_operons
@@ -77,6 +79,48 @@ def default_alignment_name(read_path: str | None) -> str:
     name = re.sub(r"\.(fastq|fq)(\.gz)?$", "", name, flags=re.IGNORECASE)
     name = re.sub(r"[._-]R?1$", "", name, flags=re.IGNORECASE)
     return f"{name}.bam"
+
+
+def concatenate_bam_shards(
+    shard_paths: list[str],
+    output_path: str,
+    temporary_directory: str,
+    batch_size: int = 128,
+) -> None:
+    """Concatenate BAM shards without exceeding the open-file limit.
+
+    samtools cat opens every supplied BAM simultaneously. Large datasets can
+    produce more shards than the process file-descriptor limit permits, so the
+    shards are reduced in bounded batches before the final concatenation.
+    """
+    if not shard_paths:
+        raise ValueError("No BAM shards were supplied")
+    if batch_size < 2:
+        raise ValueError("batch_size must be at least 2")
+
+    current = list(shard_paths)
+    level = 0
+
+    while len(current) > batch_size:
+        next_level = []
+        for batch_number, start in enumerate(range(0, len(current), batch_size)):
+            batch = current[start:start + batch_size]
+            intermediate = str(
+                Path(temporary_directory)
+                / f"concat_level{level}_{batch_number:06d}.bam"
+            )
+            pysam.cat("-o", intermediate, *batch)
+            next_level.append(intermediate)
+
+            # The successfully combined inputs are no longer needed. Removing
+            # them prevents temporary disk use from growing at each level.
+            for path in batch:
+                os.unlink(path)
+
+        current = next_level
+        level += 1
+
+    pysam.cat("-o", output_path, *current)
 
 
 def ensure_suffix(path: str, suffix: str) -> str:
@@ -386,6 +430,12 @@ def add_align_args(al: argparse.ArgumentParser) -> None:
     post = al.add_argument_group("BAM post-processing")
     post.add_argument("--sort-bam", action="store_true", help="Sort output BAM by coordinate and create index (.bai).")
     post.add_argument("--sort-threads", type=int, default=None, help="Threads for BAM sorting (default: same as --threads).")
+    post.add_argument("--sort-memory", default=None, metavar="SIZE", help="Memory per sorting thread, for example 1G or 8G.")
+    post.add_argument(
+        "--uncompressed-bam",
+        action="store_true",
+        help="Write uncompressed BAM for immediate downstream sorting.",
+    )
 
     # =========================================================
     # rRNA filtering
@@ -513,11 +563,8 @@ def run_align(args) -> int:
         else:
             bam_ref_lengths.append(c.length)
 
-    bw = open_bam_writer(
-        args.out,
-        ref_names=[c.name for c in refset.contigs()],
-        ref_lengths=bam_ref_lengths,
-    )
+    ref_names = [c.name for c in refset.contigs()]
+    bw = None
 
     mapped = 0
     total = 0
@@ -566,33 +613,49 @@ def run_align(args) -> int:
 
             pe_iter = _pe_iter_filtered(args.fq1, args.fq2)
 
-            for idx, qname, r1s, r1q, r2s, r2q, ph in align_paired_pool(
-                pairs_iter=pe_iter,
-                ctx=ctx,
-                threads=args.threads,
-                chunk_size=args.chunk_size,
-            ):
-                total += 2
-                if ph.hit1:
-                    mapped += 1
-                if ph.hit2:
-                    mapped += 1
+            out_parent = str(Path(args.out).resolve().parent)
+            shard_paths = {}
+            completed_pairs = 0
+            with tempfile.TemporaryDirectory(prefix=".botas_bam_shards_", dir=out_parent) as shard_dir:
+                for shard_id, shard_path, pair_count, read_count, mapped_count in align_paired_pool(
+                    pairs_iter=pe_iter,
+                    ctx=ctx,
+                    threads=args.threads,
+                    shard_dir=shard_dir,
+                    ref_names=ref_names,
+                    ref_lengths=bam_ref_lengths,
+                    # Coordinate sorting will compress the final BAM. Keeping
+                    # temporary shards uncompressed avoids a redundant
+                    # compress/decompress cycle without changing records.
+                    bam_mode="wb0" if (args.sort_bam or args.uncompressed_bam) else "wb",
+                    chunk_size=args.chunk_size,
+                ):
+                    shard_paths[shard_id] = shard_path
+                    completed_pairs += pair_count
+                    total += read_count
+                    mapped += mapped_count
 
-                write_pair(
-                    bw,
-                    qname=qname,
-                    r1_seq=r1s,
-                    r1_qual=r1q,
-                    r2_seq=r2s,
-                    r2_qual=r2q,
-                    hit1=ph.hit1,
-                    hit2=ph.hit2,
-                    proper_pair=ph.proper_pair,
-                    insert_size=ph.insert_size,
-                )
+                    if completed_pairs % 10000 == 0 or pair_count < args.chunk_size:
+                        log.info("Processed %d pairs...", completed_pairs)
 
-                if (idx + 1) % 10000 == 0:
-                    log.info("Processed %d pairs...", idx + 1)
+                if shard_paths:
+                    # Concatenate in input-chunk order so the unsorted BAM remains
+                    # deterministic even though workers finish out of order.
+                    ordered_shards = [shard_paths[i] for i in sorted(shard_paths)]
+                    combined_path = str(Path(shard_dir) / "combined.bam")
+                    concatenate_bam_shards(
+                        ordered_shards,
+                        combined_path,
+                        shard_dir,
+                    )
+                    os.replace(combined_path, args.out)
+                else:
+                    empty_bw = open_bam_writer(
+                        args.out,
+                        ref_names=ref_names,
+                        ref_lengths=bam_ref_lengths,
+                    )
+                    empty_bw.close()
 
             log.info(
                 "Done (PE). total_reads=%d mapped_reads=%d (%.2f%%)",
@@ -604,6 +667,11 @@ def run_align(args) -> int:
         # =========================================================
         else:
             log.info("Running single-end mode: fq=%s", args.fq)
+            bw = open_bam_writer(
+                args.out,
+                ref_names=ref_names,
+                ref_lengths=bam_ref_lengths,
+            )
 
             def _se_iter_filtered(fq):
                 nonlocal rrna_examined, rrna_filtered
@@ -720,7 +788,8 @@ def run_align(args) -> int:
             )
 
     finally:
-        bw.close()
+        if bw is not None:
+            bw.close()
 
     # -------------------------------------------------
     # Optional BAM sorting and indexing
@@ -733,7 +802,11 @@ def run_align(args) -> int:
         else:
             sorted_bam = out_bam.with_suffix(".sorted.bam")
         log.info("Sorting BAM (%d threads): %s → %s", sort_threads, out_bam.name, sorted_bam.name)
-        pysam.sort("-@", str(sort_threads), "-o", str(sorted_bam), str(out_bam))
+        sort_args = ["-@", str(sort_threads)]
+        if args.sort_memory:
+            sort_args.extend(["-m", str(args.sort_memory)])
+        sort_args.extend(["-o", str(sorted_bam), str(out_bam)])
+        pysam.sort(*sort_args)
         log.info("Indexing BAM: %s", sorted_bam.name)
         pysam.index(str(sorted_bam))
         log.info("BAM sorting and indexing complete")

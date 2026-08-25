@@ -110,12 +110,16 @@ def check_pair_circular(
     pos2: int,
     strand2: str,
     read_len: int,
-    insert: int,
+    max_insert: int,
     L: int,
-    tol_ins: int = 20,
+    tol_ins: int | None = None,
 ) -> Tuple[bool, int, str]:
     """
-    Validate and score a circular PE pair.
+    Validate a circular PE pair against the maximum allowed insert size.
+
+    ``tol_ins`` is retained only for compatibility with older callers and is
+    ignored.  Expected insert size is a mate-rescue hint, not a requirement
+    for deciding whether an already aligned pair is proper.
 
     Returns:
         (is_proper, observed_insert, orientation)
@@ -133,9 +137,7 @@ def check_pair_circular(
     if not ok:
         return False, 0, "invalid"
 
-    # Insert-size validation
-    if abs(ins_obs - insert) > tol_ins:
+    if not 0 < ins_obs <= max_insert:
         return False, ins_obs, orientation
 
     return True, ins_obs, orientation
-

@@ -8,22 +8,7 @@ validation MUST live here.
 
 from __future__ import annotations
 from typing import Tuple
-from botas.core.circular import circular_insert_fr, circular_dist, circ_dist
-
-
-def _best_shift(p_fixed, p_var, L, expected_insert):
-    """Return p_var shifted by {0, +L, -L} that best matches expected insert."""
-    best_p = p_var
-    best_err = abs(circ_dist(p_fixed, p_var, L) - expected_insert)
-
-    for shift in (L, -L):
-        p_try = p_var + shift
-        err = abs(abs(p_try - p_fixed) - expected_insert)
-        if err < best_err:
-            best_err = err
-            best_p = p_try
-
-    return best_p
+from botas.core.circular import circular_insert_fr
 
 
 # -------------------------------------------------------
@@ -69,12 +54,15 @@ def is_proper_pair_circular(
     pos2: int,
     strand2: str,
     read_len: int,
-    expected_insert: int,
+    max_insert: int,
     L: int,
-    tol_ins: int,
 ) -> Tuple[bool, int, str]:
     """
     Proper-pair check for circular references.
+
+    ``expected_insert`` belongs to mate rescue: it predicts where an absent
+    mate should be searched for.  Proper-pair validation must instead honor
+    the user-facing ``max_insert`` limit, just as the linear path does.
     """
     ok, ins, orient = circular_insert_fr(
         pos1, strand1, pos2, strand2, read_len, L
@@ -83,7 +71,7 @@ def is_proper_pair_circular(
     if not ok:
         return False, 0, "invalid"
 
-    if abs(ins - expected_insert) > tol_ins:
+    if not 0 < ins <= max_insert:
         return False, ins, orient
 
     return True, ins, orient
@@ -104,37 +92,22 @@ def is_proper_pair_unified(
     ref_len: int,
     max_insert: int,
     expected_insert: int,
-    tol_ins: int = 50,
 ) -> Tuple[bool, int, str]:
     """
     Unified PE proper-pair check (linear or circular).
+
+    ``expected_insert`` remains in this interface for compatibility with the
+    alignment pipeline, but validation intentionally uses ``max_insert``.
     """
     if circular:
-        L = ref_len
-
-        # ---- PE circular coordinate normalization ----
-        # Try adjusting pos2 relative to pos1
-        p2_adj = _best_shift(pos1, pos2, L, expected_insert)
-        err2 = abs(abs(p2_adj - pos1) - expected_insert)
-
-        # Try adjusting pos1 relative to pos2
-        p1_adj = _best_shift(pos2, pos1, L, expected_insert)
-        err1 = abs(abs(pos2 - p1_adj) - expected_insert)
-
-        if err2 <= err1 and err2 <= tol_ins:
-            pos2 = p2_adj
-        elif err1 < err2 and err1 <= tol_ins:
-            pos1 = p1_adj
-
         return is_proper_pair_circular(
             pos1,
             strand1,
             pos2,
             strand2,
             read_len,
-            expected_insert,
-            L,
-            tol_ins,
+            max_insert,
+            ref_len,
         )
 
     return is_proper_pair_linear(

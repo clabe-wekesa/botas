@@ -6,7 +6,7 @@ import logging
 from botas.io.reference_set import load_reference_set
 from botas.core.ref_index import KmerIndex
 from botas.core.align_pe import align_pair
-from botas.io.bam_writer import ref_aligned_length
+from botas.io.bam_writer import open_bam_writer, ref_aligned_length, write_pair
 from botas.core.align_core import Hit
 from botas.core.parallel_context import PEContext
 from botas.core.utils import chunked
@@ -73,6 +73,9 @@ class _PEWorkerConfig:
     do_rescue: bool
     sensitive: bool
     debug_pairs: int
+    ref_names: tuple[str, ...]
+    ref_lengths: tuple[int, ...]
+    bam_mode: str
 
 
 # ============================================================
@@ -159,75 +162,117 @@ def _pick_better_pair(best, cand):
     return cand if _rank(cand) > _rank(best) else best
 
 
-def _pe_worker(chunk):
+def _pe_worker(task):
     cfg, contigs = _CTX
-    out = []
+    shard_id, shard_path, chunk = task
+    total_reads = 0
+    mapped_reads = 0
+    processed_pairs = 0
+    bw = open_bam_writer(
+        shard_path,
+        ref_names=list(cfg.ref_names),
+        ref_lengths=list(cfg.ref_lengths),
+        mode=cfg.bam_mode,
+    )
 
-    for idx, qname, r1s, r1q, r2s, r2q in chunk:
-        best_ph = None
+    try:
+        for idx, qname, r1s, r1q, r2s, r2q in chunk:
+            best_ph = None
 
-        # Fast path for single-contig references.
-        # For E. coli there is only one contig, so contig pre-filtering
-        # and ranking are unnecessary and only add extra seed-counting cost.
-        if len(contigs) == 1:
-            cand_contigs = contigs
-        else:
-            scored = []
-
-            for c in contigs:
-                try:
-                    h1 = c.index.num_seed_hits(r1s)
-                    h2 = c.index.num_seed_hits(r2s)
-                except AttributeError:
-                    scored.append((c, 0, 0))
-                    continue
-
-                if (h1 + h2) < cfg.min_seed_hits:
-                    continue
-
-                scored.append((c, h1 * h2, h1 + h2))
-
-            if scored:
-                scored.sort(key=lambda x: (x[1], x[2]), reverse=True)
-                cand_contigs = [x[0] for x in scored[:3]]
-            else:
+            # Fast path for single-contig references.
+            # For E. coli there is only one contig, so contig pre-filtering
+            # and ranking are unnecessary and only add extra seed-counting cost.
+            if len(contigs) == 1:
                 cand_contigs = contigs
+            else:
+                scored = []
 
-        for c in cand_contigs:
-            ph = align_pair(
+                for c in contigs:
+                    try:
+                        h1 = c.index.num_seed_hits(r1s)
+                        h2 = c.index.num_seed_hits(r2s)
+                    except AttributeError:
+                        scored.append((c, 0, 0))
+                        continue
+
+                    if (h1 + h2) < cfg.min_seed_hits:
+                        continue
+
+                    scored.append((c, h1 * h2, h1 + h2))
+
+                if scored:
+                    scored.sort(key=lambda x: (x[1], x[2]), reverse=True)
+                    cand_contigs = [x[0] for x in scored[:3]]
+                else:
+                    cand_contigs = contigs
+
+            for c in cand_contigs:
+                ph = align_pair(
+                    r1_seq=r1s,
+                    r2_seq=r2s,
+                    rname=c.name,
+                    ref_seq=c.seq,
+                    index=c.index,
+                    circular=c.circular,
+                    k=getattr(c.index, "k", cfg.k),
+                    step=cfg.step,
+                    pad=cfg.pad,
+                    max_windows=cfg.max_windows,
+                    min_seed_hits=cfg.min_seed_hits,
+                    max_insert=cfg.max_insert,
+                    expected_insert=cfg.expected_insert,
+                    rescue_pad=cfg.rescue_pad,
+                    do_rescue=cfg.do_rescue,
+                    sensitive=cfg.sensitive,
+                    debug=(cfg.debug_pairs > 0 and idx < cfg.debug_pairs),
+                    pair_id=idx,
+                    original_len=getattr(c, "orig_len", None),
+                    circular_overhang=getattr(c, "circular_overhang", 0),
+                )
+
+                best_ph = _pick_better_pair(best_ph, ph)
+
+                if best_ph and best_ph.proper_pair and best_ph.hit1 and best_ph.hit2:
+                    break
+
+            if best_ph.hit1:
+                mapped_reads += 1
+            if best_ph.hit2:
+                mapped_reads += 1
+            total_reads += 2
+            processed_pairs += 1
+
+            write_pair(
+                bw,
+                qname=qname,
                 r1_seq=r1s,
+                r1_qual=r1q,
                 r2_seq=r2s,
-                rname=c.name,
-                ref_seq=c.seq,
-                index=c.index,
-                circular=c.circular,
-                k=getattr(c.index, "k", cfg.k),
-                step=cfg.step,
-                pad=cfg.pad,
-                max_windows=cfg.max_windows,
-                min_seed_hits=cfg.min_seed_hits,
-                max_insert=cfg.max_insert,
-                expected_insert=cfg.expected_insert,
-                rescue_pad=cfg.rescue_pad,
-                do_rescue=cfg.do_rescue,
-                sensitive=cfg.sensitive,
-                debug=(cfg.debug_pairs > 0 and idx < cfg.debug_pairs),
-                pair_id=idx,
-                original_len=getattr(c, "orig_len", None),
-                circular_overhang=getattr(c, "circular_overhang", 0),
+                r2_qual=r2q,
+                hit1=best_ph.hit1,
+                hit2=best_ph.hit2,
+                proper_pair=best_ph.proper_pair,
+                insert_size=best_ph.insert_size,
             )
+    finally:
+        bw.close()
 
-            best_ph = _pick_better_pair(best_ph, ph)
-
-            if best_ph and best_ph.proper_pair and best_ph.hit1 and best_ph.hit2:
-                break
-
-        out.append((idx, qname, r1s, r1q, r2s, r2q, best_ph))
-
-    return out
+    # Return only small metadata. Read strings, qualities and alignment objects
+    # remain inside the worker and are never serialized back to the parent.
+    return shard_id, shard_path, processed_pairs, total_reads, mapped_reads
 
 
-def align_paired_pool(*, pairs_iter, ctx: PEContext, threads: int, chunk_size: int = 5000):
+def align_paired_pool(
+    *,
+    pairs_iter,
+    ctx: PEContext,
+    threads: int,
+    shard_dir: str,
+    ref_names: list[str],
+    ref_lengths: list[int],
+    bam_mode: str = "wb",
+    chunk_size: int = 5000,
+):
     """
     pairs_iter yields: (idx, r1, r2)
 
@@ -251,6 +296,9 @@ def align_paired_pool(*, pairs_iter, ctx: PEContext, threads: int, chunk_size: i
         do_rescue=ctx.do_rescue,
         sensitive=ctx.sensitive,
         debug_pairs=ctx.debug_pairs,
+        ref_names=tuple(ref_names),
+        ref_lengths=tuple(ref_lengths),
+        bam_mode=bam_mode,
     )
 
     # Build indexes once in the main process
@@ -291,26 +339,21 @@ def align_paired_pool(*, pairs_iter, ctx: PEContext, threads: int, chunk_size: i
     )
 
     try:
-        for results in pool.imap_unordered(
-            _pe_worker,
-            (
-                [
-                    (
-                        idx,
-                        r1.name,
-                        r1.seq,
-                        r1.qual,
-                        r2.seq,
-                        r2.qual,
-                    )
+        def _tasks():
+            for shard_id, chunk in enumerate(chunked(pairs_iter, chunk_size)):
+                shard_path = f"{shard_dir}/part_{shard_id:06d}.bam"
+                records = [
+                    (idx, r1.name, r1.seq, r1.qual, r2.seq, r2.qual)
                     for idx, r1, r2 in chunk
                 ]
-                for chunk in chunked(pairs_iter, chunk_size)
-            ),
+                yield shard_id, shard_path, records
+
+        for result in pool.imap_unordered(
+            _pe_worker,
+            _tasks(),
             chunksize=1,
         ):
-            for rec in results:
-                yield rec
+            yield result
     finally:
         pool.close()
         pool.join()

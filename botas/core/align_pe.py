@@ -12,9 +12,8 @@ from botas.core.utils import revcomp
 from botas.core.circular import (
     circ_dist,
     expected_mate_start,
-    check_pair_circular,
 )
-from botas.core.edlib_utils import edlib_align_hw_locations, edlib_get_cigar
+from botas.core.edlib_utils import edlib_align_hw_path
 from botas.core.pairing import is_proper_pair_unified
 
 logger = logging.getLogger(__name__)
@@ -112,20 +111,47 @@ def rescue_mate(
     except ValueError:
         return None
 
-    if use_fast:
+    # Keep circular rescue on its established coordinate path until the
+    # padded-reference conversion is regression-tested against wrap truth.
+    # The optimized seed projection below is currently enabled only for the
+    # linear path used by the experimental E. coli benchmark.
+    if use_fast and not circular:
         query = mate_seq if mate_strand == "+" else revcomp(mate_seq)
 
+        # iter_read_minimizers() yields (query_position, minimizer), not a
+        # reference position.  Look the minimizer up in the reference index
+        # and project every usable seed hit to a candidate alignment start.
+        # The previous implementation treated query_position as genomic,
+        # which made the fast-rescue hint ineffective except near coordinate 0.
+        seed_table = getattr(index, "_index", None)
         best_p0 = None
         best_d = rescue_pad + 1
 
-        for mm in index.iter_read_minimizers(query):
-            p0 = mm[0]
-            p0_orig = (p0 - circular_overhang) % L if circular else p0
-            d = circ_dist(p0_orig, center0, L) if circular else abs(p0 - center0)
+        if seed_table is not None:
+            for qpos, minimizer in index.iter_read_minimizers(query):
+                positions = seed_table.get(minimizer)
+                if not positions or len(positions) > 50:
+                    continue
 
-            if d <= rescue_pad and d < best_d:
-                best_d = d
-                best_p0 = p0
+                for rpos in positions:
+                    candidate0 = int(rpos) - int(qpos)
+                    candidate_orig = (
+                        (candidate0 - circular_overhang) % L
+                        if circular
+                        else candidate0
+                    )
+                    d = (
+                        circ_dist(candidate_orig, center0, L)
+                        if circular
+                        else abs(candidate_orig - center0)
+                    )
+
+                    if d <= rescue_pad and d < best_d:
+                        best_d = d
+                        best_p0 = candidate0
+
+                        if best_d == 0:
+                            break
 
                 if best_d == 0:
                     break
@@ -146,18 +172,18 @@ def rescue_mate(
     if not ref_slice:
         return None
 
-    out = edlib_align_hw_locations(query, ref_slice)
+    # One task="path" call returns edit distance, CIGAR and location.  The
+    # previous rescue path aligned the same query/slice twice: once for the
+    # location and again for the CIGAR.
+    out = edlib_align_hw_path(query, ref_slice)
     if out is None:
         return None
 
-    edits, rb, _ = out
+    score, cigar, rb, _ = out
+    edits = -int(score)
 
     max_edits = int(0.15 * len(query))
     if edits > max_edits:
-        return None
-
-    cigar = edlib_get_cigar(query, ref_slice)
-    if cigar is None:
         return None
 
     abs_start = slice_start + rb
@@ -231,10 +257,51 @@ def align_pair_simple(
         min_seed_hits=min_seed_hits,
     )
 
-    hit2 = None
+    # Common paired-end fast path: use a confident R1 alignment to place R2
+    # in its expected orientation and local insert-size neighbourhood.  Only
+    # accept the shortcut when both alignments have at most five edits and the
+    # resulting geometry is a proper pair.  Difficult/ambiguous fragments fall
+    # back to the original unrestricted two-mate search below.
+    if do_rescue and not circular and hit1 is not None and hit1.ascore >= -5:
+        mate_strand = "-" if hit1.strand == "+" else "+"
+        fast_hit2 = rescue_mate(
+            mate_seq=r2_seq,
+            mate_strand=mate_strand,
+            anchor_hit=hit1,
+            ref_seq=ref_seq,
+            index=index,
+            circular=circular,
+            expected_insert=expected_insert,
+            rescue_pad=rescue_pad,
+            use_fast=True,
+            original_len=L,
+            circular_overhang=circular_overhang,
+        )
 
-    hit2_rev = align_read(
-        read_seq=revcomp(r2_seq),
+        if fast_hit2 is not None and fast_hit2.ascore >= -5:
+            fast_proper, fast_ins, _ = _safe_pair_check(
+                hit1=hit1,
+                hit2=fast_hit2,
+                read_len=read_len,
+                ref_len=L,
+                circular=circular,
+                max_insert=max_insert,
+                expected_insert=expected_insert,
+            )
+            if fast_proper:
+                return PairHit(
+                    hit1=hit1,
+                    hit2=fast_hit2,
+                    proper_pair=True,
+                    insert_size=fast_ins,
+                )
+
+    # align_read() already evaluates both the forward sequence and its
+    # reverse complement.  Passing a pre-reversed R2 and then forcing its
+    # strand to "-" loses valid RF pairs (R1 -, R2 +), which in turn clears
+    # SAM proper-pair flag 0x2 for roughly half of an ordinary FR library.
+    hit2 = align_read(
+        read_seq=r2_seq,
         rname=rname,
         ref_seq=ref_seq,
         index=index,
@@ -245,17 +312,6 @@ def align_pair_simple(
         max_windows=max_windows,
         min_seed_hits=min_seed_hits,
     )
-
-    if hit2_rev:
-        hit2 = Hit(
-            rname=hit2_rev.rname,
-            pos0=hit2_rev.pos0,
-            strand="-",
-            cigar=hit2_rev.cigar,
-            ascore=hit2_rev.ascore,
-            mapq=hit2_rev.mapq,
-            junction=hit2_rev.junction,
-        )
 
     def _norm_hit(hit):
         if hit is None or not circular:
@@ -325,7 +381,7 @@ def align_pair_simple(
 
         rescued = rescue_mate(
             mate_seq=r2_seq if weak_is_r2 else r1_seq,
-            mate_strand=orig_weak.strand,
+            mate_strand="-" if anchor.strand == "+" else "+",
             anchor_hit=anchor,
             ref_seq=ref_seq,
             index=index,
@@ -355,7 +411,10 @@ def align_pair_simple(
         if anchor:
             is_r1_anchor = anchor is hit1
             mate_seq = r2_seq if is_r1_anchor else r1_seq
-            mate_strand = "-" if is_r1_anchor else "+"
+            # A valid inward-facing pair always places the mate on the
+            # strand opposite the anchor.  Read number alone does not
+            # determine orientation (RF pairs are valid too).
+            mate_strand = "-" if anchor.strand == "+" else "+"
 
             rescued = rescue_mate(
                 mate_seq=mate_seq,
@@ -404,27 +463,15 @@ def align_pair_simple(
             )
 
     if hit1 and hit2:
-        if circular:
-            proper, ins, _ = check_pair_circular(
-                hit1.pos0,
-                hit1.strand,
-                hit2.pos0,
-                hit2.strand,
-                read_len,
-                expected_insert,
-                L,
-                tol_ins=50,
-            )
-        else:
-            proper, ins, _ = _safe_pair_check(
-                hit1=hit1,
-                hit2=hit2,
-                read_len=read_len,
-                ref_len=L,
-                circular=False,
-                max_insert=max_insert,
-                expected_insert=expected_insert,
-            )
+        proper, ins, _ = _safe_pair_check(
+            hit1=hit1,
+            hit2=hit2,
+            read_len=read_len,
+            ref_len=L,
+            circular=circular,
+            max_insert=max_insert,
+            expected_insert=expected_insert,
+        )
 
     return PairHit(
         hit1=hit1,
