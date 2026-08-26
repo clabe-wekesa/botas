@@ -47,3 +47,7 @@ Thumbs.db
 
 #acheives
 *.zip
+
+botas_manuscript_scripts/
+
+dist_0_1_6/

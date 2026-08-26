@@ -560,12 +560,24 @@ Reference genomes, external databases, and publicly archived experimental RNA-se
 
 # 17. Citation
 
-If you use these supplementary benchmarking materials, please cite the associated BOTAS manuscript and the archived Zenodo record.
+If you use these supplementary benchmarking materials, please cite the associated BOTAS manuscript and the archived Zenodo dataset.
 
-A complete citation and DOI will be added after publication/Zenodo deposition.
+Wekesa, C., Kelvin, K., Muoma, J., & Mithöfer, A. (2026). *BOTAS: Supplementary Benchmarking Data and Scripts for Bacterial RNA-seq Analysis* (Version 1.0) [Dataset]. Zenodo. https://doi.org/10.5281/zenodo.22101516
+
+The BOTAS manuscript will also be cited once its publication details are available.
 
 ---
 
 # 18. License
 
-The license applying to these supplementary scripts and data should be specified in the Zenodo record and included with the archive.
+The supplementary benchmarking data and scripts in this archive are released under the Creative Commons Attribution 4.0 International (CC BY 4.0) license.
+
+Copyright © 2026 Clabe Wekesa.
+
+Under the CC BY 4.0 license, these materials may be shared and adapted provided appropriate credit is given to the creator(s), a link to the license is provided, and any changes are indicated.
+
+License: https://creativecommons.org/licenses/by/4.0/
+
+Zenodo DOI: https://doi.org/10.5281/zenodo.22101516
+
+---
