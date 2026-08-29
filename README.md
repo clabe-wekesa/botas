@@ -1,439 +1,332 @@
 # BOTAS
 
-## An Integrated Bacterial RNA-seq Analysis Framework with Circular-Aware Alignment and Operon Inference
+## Bacterial Operon-aware Transcriptome Alignment Suite
 
-**Clabe Simiyu Wekesa**, Kelvin Kiprotich, John Muoma, Axel Mithöfer
+BOTAS is a seed-and-extend RNA-seq alignment and quantification framework designed specifically for bacterial genomes. It combines bacterial read alignment, native circular-genome handling, gene-level quantification, and operon inference in a unified Python command-line application.
 
-BOTAS (Bacterial Operon-Aware Transcriptome Alignment System) is an integrated framework for bacterial RNA-seq analysis that combines reference indexing, read alignment, gene quantification, and operon inference within a single command-line application.
+Unlike general-purpose RNA-seq aligners designed primarily around eukaryotic splicing, BOTAS targets features of prokaryotic transcriptomes such as dense gene organization, polycistronic transcription, strand specificity, and circular chromosomes and plasmids.
 
-Unlike conventional RNA-seq workflows that require multiple independent software packages, BOTAS provides an end-to-end workflow designed specifically for bacterial transcriptomics. The framework supports circular chromosomes and plasmids, single-end and paired-end sequencing, fragment-level gene quantification, and RNA-seq-guided operon inference while maintaining compatibility with standard genomic file formats.
+## Key features
 
-BOTAS is implemented in Python and is designed for reproducible, modular, and high-throughput bacterial transcriptomic analyses.
+- Seed-and-extend alignment optimized for bacterial genomes
+- Paired-end and single-end RNA-seq alignment
+- Native support for circular chromosomes and plasmids
+- BOTAS-native reusable reference indexes
+- Optional rRNA filtering using a bundled reference set
+- Multiprocessing support for alignment and coverage calculation
+- Coordinate-sorted BAM generation and indexing through `pysam`
+- Gene-level and operon-level expression quantification
+- Operon inference from RNA-seq coverage and genomic organization
+- Multi-BAM consensus operon inference
+- Docker and Apptainer/Singularity support for reproducible deployment
 
----
+## Requirements
 
-# Features
+BOTAS requires Python 3.10 or newer. Its core Python dependencies are:
 
-## Native Reference Indexing
+- `pysam >= 0.22`
+- `edlib >= 1.3.9`
+- `biopython >= 1.81`
 
-* Native minimizer-based reference indexing
-* Reusable BOTAS index format (`*.botas.idx`)
-* Configurable k-mer and minimizer window sizes
-* Support for linear and circular bacterial genomes
-* Circular overhang indexing for reads spanning the origin
-* Selective circular treatment of chromosomes or plasmids
+`tqdm >= 4.66` is available as an optional progress-display dependency.
 
-## RNA-seq Alignment
+BOTAS does not require external aligners such as Bowtie2, STAR, HISAT2, or BWA for its native alignment workflow.
 
-* Native bacterial read alignment engine
-* Single-end and paired-end read alignment
-* Support for circular genome boundary crossings
-* Edit-distance alignment using Edlib
-* Mapping-quality estimation
-* Optional rRNA read filtering
-* Optional coordinate sorting and BAM indexing
-* Multiprocessing support
+## Installation
 
-## Gene Quantification
-
-* Gene-level paired-end fragment counting
-* Reconstruction of paired-end fragments from coordinate-sorted BAM files
-* Multi-sample quantification
-* Configurable minimum feature overlap
-* Optional largest-overlap assignment
-* Assignment statistics for mapped, ambiguous, unmapped, and unassigned fragments
-* Gene counts compatible with featureCounts under equivalent settings
-
-## Operon Inference
-
-* RNA-seq-guided operon prediction
-* Integration of genomic adjacency and transcriptional evidence
-* Strand-consistency analysis
-* Intergenic-distance evaluation
-* Gene-coverage comparison
-* Consensus operon inference across multiple BAM files
-* TSV output
-* Optional GFF output
-
-## General
-
-* Python implementation
-* Standard FASTA, FASTQ, BAM, GFF3, and TSV file support
-* Reproducible command-line workflow
-* Modular architecture
-* Suitable for integration into automated pipelines
-
----
-
-# Installation
-
-## Install from PyPI
+### PyPI
 
 ```bash
-pip install botas-rnaseq
+python -m pip install botas-rnaseq
 ```
 
-## Install the latest development version
+The installed command is:
 
 ```bash
-pip install git+https://github.com/clabe-wekesa/botas.git
+botas --help
 ```
 
-## Install from source
+### From source
 
 ```bash
 git clone https://github.com/clabe-wekesa/botas.git
 cd botas
-pip install .
+python -m pip install .
 ```
 
-## Development installation
+To include the optional progress display:
 
 ```bash
-pip install -e ".[dev]"
+python -m pip install ".[progress]"
 ```
 
----
+For development:
 
-# Workflow
+```bash
+python -m pip install -e ".[dev]"
+```
 
-A typical BOTAS analysis consists of four steps.
+## Command overview
 
 ```text
-Reference FASTA
-       │
-       ▼
-botas index
-       │
-       ▼
-BOTAS index (.botas.idx)
-       │
-       ▼
-botas align
-       │
-       ▼
-Coordinate-sorted BAM
-       │
-       ├──────────────────┐
-       ▼                  ▼
-botas quantify     botas getOperons
-       │                  │
-       ▼                  ▼
- Gene counts       Operon predictions
+botas
+├── index       Build a BOTAS-native reference index
+├── align       Align RNA-seq reads to a bacterial reference
+├── quantify    Quantify gene or operon expression from BAM files
+└── getOperons  Infer bacterial operons from RNA-seq alignments
 ```
 
----
-
-# Quick Start
-
-## 1. Build a reference index
+Use `--help` with any command to see all options:
 
 ```bash
-botas index \
-    --ref reference.fasta \
-    --out reference.botas.idx
-```
-
-For a circular bacterial genome:
-
-```bash
-botas index \
-    --ref reference.fasta \
-    --circular \
-    --out reference.botas.idx
-```
-
-Selected contigs, such as plasmids, can be treated as circular:
-
-```bash
-botas index \
-    --ref reference.fasta \
-    --circular-contigs plasmid1,plasmid2 \
-    --out reference.botas.idx
-```
-
-When `--out` is omitted, BOTAS generates an output name ending in `.botas.idx`.
-
----
-
-## 2. Align sequencing reads
-
-### Paired-end alignment
-
-```bash
-botas align \
-    --index reference.botas.idx \
-    --fq1 reads_R1.fastq.gz \
-    --fq2 reads_R2.fastq.gz \
-    --pool \
-    --threads 8 \
-    --sort-bam \
-    --out sample.bam
-```
-
-### Single-end alignment
-
-```bash
-botas align \
-    --index reference.botas.idx \
-    --fq reads.fastq.gz \
-    --threads 4 \
-    --sort-bam \
-    --out sample.bam
-```
-
-BOTAS can also align directly from a reference FASTA:
-
-```bash
-botas align \
-    --ref reference.fasta \
-    --fq1 reads_R1.fastq.gz \
-    --fq2 reads_R2.fastq.gz \
-    --circular \
-    --pool \
-    --threads 8 \
-    --sort-bam \
-    --out sample.bam
-```
-
-The `--sort-bam` option creates a coordinate-sorted BAM file and its corresponding `.bai` index.
-
-### Optional rRNA filtering
-
-```bash
-botas align \
-    --index reference.botas.idx \
-    --fq1 reads_R1.fastq.gz \
-    --fq2 reads_R2.fastq.gz \
-    --filter-rrna \
-    --pool \
-    --threads 8 \
-    --sort-bam \
-    --out sample.bam
-```
-
-BOTAS uses its bundled rRNA database unless a custom FASTA file is supplied with `--rrna-db`.
-
-### Logging level
-
-```bash
-botas align ... --log INFO
-botas align ... --log DEBUG
-botas align ... --log WARN
-botas align ... --log ERROR
-```
-
-The logging level must be provided after `--log`.
-
----
-
-## 3. Quantify gene expression
-
-```bash
-botas quantify \
-    --bam sample.sorted.bam \
-    --gff annotation.gff \
-    --feature-type gene \
-    --id-attribute locus_tag \
-    --out sample.gene_counts.tsv
-```
-
-The BAM input must contain coordinate-sorted paired-end alignments.
-
-When `--id-attribute` is omitted, BOTAS uses `locus_tag` for gene features.
-
-### Quantify multiple BAM files
-
-```bash
-botas quantify \
-    --bam sample1.sorted.bam sample2.sorted.bam sample3.sorted.bam \
-    --gff annotation.gff \
-    --feature-type gene \
-    --id-attribute locus_tag \
-    --out gene_expression_matrix.tsv
-```
-
-### Largest-overlap assignment
-
-By default, fragments overlapping multiple features remain ambiguous. They may instead be assigned to the feature with the largest overlap:
-
-```bash
-botas quantify \
-    --bam sample.sorted.bam \
-    --gff annotation.gff \
-    --largest-overlap
-```
-
-Equal largest overlaps remain ambiguous.
-
----
-
-## 4. Infer operons
-
-### Infer operons from one BAM file
-
-```bash
-botas getOperons \
-    --bam sample.sorted.bam \
-    --gff annotation.gff \
-    --out sample.operons.tsv
-```
-
-### Infer consensus operons from multiple BAM files
-
-```bash
-botas getOperons \
-    --bam sample1.sorted.bam sample2.sorted.bam sample3.sorted.bam \
-    --gff annotation.gff \
-    --consensus \
-    --out consensus.operons.tsv
-```
-
-### Write operons as GFF features
-
-```bash
-botas getOperons \
-    --bam sample.sorted.bam \
-    --gff annotation.gff \
-    --write-gff \
-    --prefix sample
-```
-
-Operon inference can be controlled using options such as:
-
-* `--max-igd`
-* `--min-coverage`
-* `--min-cov-ratio`
-* `--min-support`
-* `--min-score`
-
----
-
-# Working Directory
-
-BOTAS creates a working directory for each analysis. A custom location can be specified using:
-
-```bash
-botas -d sample.botas align ...
-```
-
-The directory contains analysis logs, temporary files, final results, and a run manifest.
-
-A typical structure is:
-
-```text
-sample.botas/
-├── logs/
-├── tmp/
-├── results/
-│   ├── sample.bam
-│   ├── sample.sorted.bam
-│   ├── sample.sorted.bam.bai
-│   ├── sample.gene_counts.tsv
-│   └── sample.operons.tsv
-└── manifest.json
-```
-
-The exact files depend on the command and options used.
-
----
-
-# Default Output Names
-
-When `--out` is omitted, BOTAS generates an output name from the input filename.
-
-| Command                             | Default suffix                  |
-| ----------------------------------- | ------------------------------- |
-| `botas index`                       | `.botas.idx`                    |
-| `botas align`                       | `.bam`                          |
-| Single-sample gene quantification   | `.gene_counts.tsv`              |
-| Single-sample operon quantification | `.operon_counts.tsv`            |
-| Multi-sample gene quantification    | `.gene_expression_matrix.tsv`   |
-| Multi-sample operon quantification  | `.operon_expression_matrix.tsv` |
-| `botas getOperons`                  | `.operons.tsv`                  |
-
-BOTAS also appends the appropriate suffix when an output prefix is supplied without the expected extension.
-
----
-
-# Command Overview
-
-```text
-botas index         Build a BOTAS reference index
-botas align         Align RNA-seq reads
-botas quantify      Quantify gene or operon expression
-botas getOperons    Infer bacterial operons
-```
-
-Detailed help is available for every command:
-
-```bash
-botas --help
 botas index --help
 botas align --help
 botas quantify --help
 botas getOperons --help
 ```
 
-The installed version can be displayed with:
+## Quick start
+
+### 1. Build a reference index
+
+For a linear reference:
+
+```bash
+botas index \
+  -r genome.fna \
+  -o genome.botas.idx
+```
+
+For a circular bacterial reference:
+
+```bash
+botas index \
+  -r genome.fna \
+  --circular \
+  --circular-overhang-percent 5 \
+  -o genome.circular.botas.idx
+```
+
+Individual contigs can instead be marked as circular with `--circular-contigs`.
+
+### 2. Align paired-end reads
+
+```bash
+botas -d analysis \
+  align \
+  -x genome.botas.idx \
+  -1 reads_R1.fastq.gz \
+  -2 reads_R2.fastq.gz \
+  -t 8 \
+  --pool \
+  --sort-bam \
+  -o sample.bam
+```
+
+With `--sort-bam`, BOTAS also creates a coordinate-sorted BAM and `.bai` index.
+
+For single-end reads, use `--fq`:
+
+```bash
+botas -d analysis \
+  align \
+  -x genome.botas.idx \
+  --fq reads.fastq.gz \
+  -t 8 \
+  --pool \
+  --sort-bam \
+  -o sample.bam
+```
+
+BOTAS can also align directly from a FASTA reference using `-r/--ref`, although a saved BOTAS index is preferable for repeated analyses.
+
+### 3. Quantify gene expression
+
+```bash
+botas -d analysis \
+  quantify \
+  -b analysis/results/sample.sorted.bam \
+  -g genome.gff \
+  -o sample_counts.tsv
+```
+
+The default feature type is `gene`, and the default identifier attribute for genes is `locus_tag`.
+
+BOTAS can also quantify operon features:
+
+```bash
+botas -d analysis \
+  quantify \
+  -b analysis/results/sample.sorted.bam \
+  -g operons.gff \
+  --feature-type operon \
+  --id-attribute ID \
+  -o operon_counts.tsv
+```
+
+### 4. Infer operons
+
+```bash
+botas -d analysis \
+  getOperons \
+  -b analysis/results/sample.sorted.bam \
+  -g genome.gff \
+  -t 8 \
+  --write-gff
+```
+
+Operon inference uses genomic adjacency, strand consistency, and RNA-seq coverage coherence. Multiple BAM files can be analyzed independently or combined using `--consensus`.
+
+## Docker
+
+Official BOTAS container images are published through GitHub Container Registry:
+
+```text
+ghcr.io/clabe-wekesa/botas
+```
+
+For reproducible analyses, use a specific release tag rather than `latest`.
+
+### Pull the image
+
+```bash
+docker pull ghcr.io/clabe-wekesa/botas:0.1.6
+```
+
+Test it:
+
+```bash
+docker run --rm ghcr.io/clabe-wekesa/botas:0.1.6 --help
+```
+
+### Run BOTAS on local files
+
+Mount the current analysis directory at `/work` inside the container:
+
+```bash
+docker run --rm \
+  --user "$(id -u):$(id -g)" \
+  -v "$PWD:/work" \
+  ghcr.io/clabe-wekesa/botas:0.1.6 \
+  index \
+  -r /work/genome.fna \
+  -o /work/genome.botas.idx
+```
+
+The `--user` option is recommended on Linux so files created by Docker remain owned by the current user.
+
+A paired-end alignment can then be run as:
+
+```bash
+docker run --rm \
+  --user "$(id -u):$(id -g)" \
+  -v "$PWD:/work" \
+  ghcr.io/clabe-wekesa/botas:0.1.6 \
+  -d /work/analysis \
+  align \
+  -x /work/genome.botas.idx \
+  -1 /work/reads_R1.fastq.gz \
+  -2 /work/reads_R2.fastq.gz \
+  -t 8 \
+  --pool \
+  --sort-bam \
+  -o sample.bam
+```
+
+### Build the image locally
+
+From the BOTAS repository root:
+
+```bash
+docker build -t botas:0.1.6 .
+docker run --rm botas:0.1.6 --help
+```
+
+## Apptainer / Singularity
+
+Apptainer can consume the same public GHCR image, so no separate container definition is required.
+
+### Pull a SIF image
+
+```bash
+apptainer pull botas_0.1.6.sif \
+  docker://ghcr.io/clabe-wekesa/botas:0.1.6
+```
+
+Test it:
+
+```bash
+apptainer exec botas_0.1.6.sif botas --help
+```
+
+### Run with local data
+
+```bash
+apptainer exec \
+  --bind "$PWD:/work" \
+  botas_0.1.6.sif \
+  botas index \
+  -r /work/genome.fna \
+  -o /work/genome.botas.idx
+```
+
+This workflow is particularly useful on HPC systems where Apptainer or Singularity is available but users do not have permission to install system-wide software.
+
+## Container release policy
+
+A GitHub Actions workflow builds and smoke-tests the container whenever a GitHub Release is published. A release tagged, for example, `v0.1.7` publishes:
+
+```text
+ghcr.io/clabe-wekesa/botas:0.1.7
+ghcr.io/clabe-wekesa/botas:latest
+```
+
+`latest` is updated only for non-prerelease releases. For reproducibility, scientific workflows should pin a numbered BOTAS release.
+
+## Architecture
+
+```text
+botas/
+├── core/       Alignment engine, indexing, pairing, and circular handling
+├── io/         FASTQ, BAM, reference, and working-directory handling
+├── operons/    Operon inference and consensus logic
+├── quantify/   Gene and operon quantification
+├── rrna/       rRNA detection and bundled rRNA reference support
+├── data/       Packaged runtime data
+└── cli/        Command-line interface
+```
+
+The alignment engine includes k-mer/minimizer indexing, seed clustering, edit-distance extension using `edlib`, CIGAR construction, pairing logic, MAPQ scoring, and circular-coordinate handling.
+
+## Reproducibility
+
+For reproducible analyses, record the BOTAS version used:
 
 ```bash
 botas --version
 ```
 
----
+For containerized analyses, pin the image tag, for example:
 
-# Supported Input Formats
+```text
+ghcr.io/clabe-wekesa/botas:0.1.6
+```
 
-| Analysis         | Input                                     |
-| ---------------- | ----------------------------------------- |
-| Indexing         | FASTA                                     |
-| Alignment        | FASTQ or compressed FASTQ                 |
-| Quantification   | Coordinate-sorted paired-end BAM and GFF3 |
-| Operon inference | Coordinate-sorted BAM and GFF3            |
+rather than relying on `latest`.
 
----
+## Citation
 
-# Supported Output Formats
+If you use BOTAS in your research, please cite:
 
-| Analysis         | Output                      |
-| ---------------- | --------------------------- |
-| Indexing         | BOTAS index (`*.botas.idx`) |
-| Alignment        | BAM and optional BAI        |
-| Quantification   | TSV                         |
-| Operon inference | TSV and optional GFF        |
+> Wekesa, C. S. (2026). BOTAS: Bacterial Operon-aware Transcriptome Alignment System. Software manuscript in preparation.
 
----
+The citation information should be updated when the BOTAS manuscript is published.
 
-# Requirements
+## License
 
-* Python 3.10 or later
-* pysam
-* edlib
-* Biopython
+BOTAS is distributed under the MIT License. See [LICENSE](LICENSE).
 
----
+## Author
 
-# Citation
-
-When using BOTAS in published research, please cite:
-
-> Wekesa CS, Kiprotich K, Muoma J, Mithöfer A.
-> **BOTAS: An Integrated Bacterial RNA-seq Analysis Framework with Circular-Aware Alignment and Operon Inference.**
-> Manuscript under review.
-
-Citation information will be updated following publication.
-
----
-
-# License
-
-BOTAS is distributed under the MIT License.
-
----
-
-# Author
-
-**Clabe Simiyu Wekesa**
-
-GitHub: https://github.com/clabe-wekesa/botas
+**Clabe Simiyu Wekesa**  
+GitHub: [clabe-wekesa](https://github.com/clabe-wekesa)

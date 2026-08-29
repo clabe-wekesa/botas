@@ -1,0 +1,44 @@
+# Git
+.git
+.gitignore
+.github
+
+# Python caches / virtual environments
+__pycache__/
+*.py[cod]
+*.so
+.Python
+.venv/
+venv/
+env/
+
+# Test and analysis caches
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# Packaging output
+build/
+dist/
+*.egg-info/
+
+# IDE / editor files
+.vscode/
+.idea/
+*.swp
+*~
+
+# Local data and generated analysis outputs
+*.bam
+*.bai
+*.sam
+*.fastq
+*.fq
+*.fastq.gz
+*.fq.gz
+
+# OS clutter
+.DS_Store
+Thumbs.db

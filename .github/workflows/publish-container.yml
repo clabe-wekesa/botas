@@ -1,0 +1,80 @@
+name: Publish BOTAS container
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/botas
+
+jobs:
+  publish:
+    name: Build, test, and publish
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out release source
+        uses: actions/checkout@v6
+
+      - name: Resolve release version
+        id: version
+        shell: bash
+        run: |
+          tag='${{ github.event.release.tag_name }}'
+          version="${tag#v}"
+
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
+            echo "Release tag '$tag' is not a supported semantic version." >&2
+            echo "Use a tag such as v0.1.7 or 0.1.7." >&2
+            exit 1
+          fi
+
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Build container image
+        run: |
+          docker build --pull \
+            -t "${IMAGE_NAME}:${{ steps.version.outputs.version }}" \
+            .
+
+      - name: Smoke-test BOTAS commands and version
+        shell: bash
+        run: |
+          image="${IMAGE_NAME}:${{ steps.version.outputs.version }}"
+          expected="BOTAS v${{ steps.version.outputs.version }}"
+          reported="$(docker run --rm "$image" --version)"
+
+          if [[ "$reported" != "$expected" ]]; then
+            echo "Container reports '$reported' but release tag requires '$expected'." >&2
+            echo "Update the version in pyproject.toml before publishing the release." >&2
+            exit 1
+          fi
+
+          docker run --rm "$image" index --help >/dev/null
+          docker run --rm "$image" align --help >/dev/null
+          docker run --rm "$image" quantify --help >/dev/null
+          docker run --rm "$image" getOperons --help >/dev/null
+
+      - name: Log in to GitHub Container Registry
+        shell: bash
+        run: |
+          echo '${{ secrets.GITHUB_TOKEN }}' | \
+            docker login ghcr.io \
+              --username '${{ github.actor }}' \
+              --password-stdin
+
+      - name: Push release image
+        run: |
+          docker push "${IMAGE_NAME}:${{ steps.version.outputs.version }}"
+
+      - name: Update latest tag
+        if: ${{ github.event.release.prerelease == false }}
+        run: |
+          docker tag \
+            "${IMAGE_NAME}:${{ steps.version.outputs.version }}" \
+            "${IMAGE_NAME}:latest"
+          docker push "${IMAGE_NAME}:latest"
