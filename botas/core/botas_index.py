@@ -273,7 +273,7 @@ class BotasIntIndexAdapter:
 
             if self.circular:
                 start0 = pred_start % L
-                end0 = start0 + read_len + 2 * pad
+                end0 = start0 + read_len + pad
                 windows.append(Window(start0=start0 - pad, end0=end0, hits=int(cnt)))
             else:
                 windows.append(

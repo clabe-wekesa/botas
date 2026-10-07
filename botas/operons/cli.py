@@ -1,4 +1,5 @@
 import argparse
+import csv
 import pysam
 from pathlib import Path
 from botas.operons.io import load_genes, compute_gene_coverage, operon_stats, write_operons_gff
@@ -121,20 +122,35 @@ def _write_operons(args, out_tsv, out_gff, operons, cov, consensus=False):
     retained_operons = []
     column_prefix = "consensus_" if consensus else ""
 
-    with open(out_tsv, "w", encoding="utf-8") as out:
-        out.write(
-            "operon_id\tchrom\tstrand\tstart\tend\tn_genes\tgene_ids\tigds\t"
-            f"{column_prefix}mean_coverage\t{column_prefix}min_coverage\t"
-            f"{column_prefix}coverage_cv\t{column_prefix}score\t"
-            f"{column_prefix}confidence\n"
-        )
+    header = [
+        "operon_id",
+        "chrom",
+        "strand",
+        "start",
+        "end",
+        "n_genes",
+        "gene_ids",
+        "igds",
+        f"{column_prefix}mean_coverage",
+        f"{column_prefix}min_coverage",
+        f"{column_prefix}coverage_cv",
+        f"{column_prefix}score",
+        f"{column_prefix}confidence",
+    ]
+
+    with open(out_tsv, "w", encoding="utf-8", newline="") as out:
+        writer = csv.writer(out, delimiter="\t", lineterminator="\n")
+        writer.writerow(header)
 
         for op in operons:
+            if len(op) == 1 and not args.include_singletons:
+                continue
+
             chrom = op[0]["chrom"]
             strand = op[0]["strand"]
             start = min(g["start"] for g in op)
             end = max(g["end"] for g in op)
-            ids = ",".join(g["id"] for g in op)
+            ids = ",".join(g["display_id"] for g in op)
 
             igds = operon_igds(op)
             mean_cov, min_cov, cv = operon_stats(op, cov)
@@ -147,12 +163,21 @@ def _write_operons(args, out_tsv, out_gff, operons, cov, consensus=False):
             operon_id = len(retained_operons)
             conf = operon_confidence(score)
 
-            out.write(
-                f"operon_{operon_id}\t{chrom}\t{strand}\t{start}\t{end}\t"
-                f"{len(op)}\t{ids}\t{','.join(map(str, igds))}\t"
-                f"{mean_cov:.3f}\t{min_cov:.3f}\t{cv:.3f}\t"
-                f"{score:.3f}\t{conf}\n"
-            )
+            writer.writerow([
+                f"operon_{operon_id}",
+                chrom,
+                strand,
+                start,
+                end,
+                len(op),
+                ids,
+                ",".join(map(str, igds)),
+                f"{mean_cov:.3f}",
+                f"{min_cov:.3f}",
+                f"{cv:.3f}",
+                f"{score:.3f}",
+                conf,
+            ])
 
     print(f"[getOperons] wrote {out_tsv}")
 
@@ -185,7 +210,11 @@ def run_get_operons(args):
     if not 0.0 <= args.min_support <= 1.0:
         raise ValueError("--min-support must be between 0 and 1")
 
-    genes = load_genes(args.gff, feature_types=("gene",))
+    genes = load_genes(
+        args.gff,
+        feature_types=("gene",),
+        id_attribute=args.gene_id,
+    )
 
     for bam in args.bam:
 
@@ -219,8 +248,8 @@ def run_get_operons(args):
 
     if args.consensus:
         cov = {
-            gene["id"]: sum(
-                bam_cov.get(gene["id"], 0.0) for bam_cov in cov_by_bam
+            gene["internal_id"]: sum(
+                bam_cov.get(gene["internal_id"], 0.0) for bam_cov in cov_by_bam
             )
             / len(cov_by_bam)
             for gene in genes
@@ -273,6 +302,19 @@ def add_operon_args(p: argparse.ArgumentParser) -> None:
 
     io.add_argument("--gff","-g", required=True, metavar="GFF",
         help="Genome annotation in GFF3 format (gene features required).")
+
+    io.add_argument(
+        "--gene-id",
+        choices=["gene", "locus_tag", "Name", "ID"],
+        default="gene",
+        metavar="ATTR",
+        help=(
+            "GFF3 attribute used for gene labels in operon output. "
+            "Choices: gene, locus_tag, Name, ID (default: gene). "
+            "If unavailable for a feature, BOTAS falls back to another "
+            "available identifier while retaining a separate unique internal key."
+        ),
+    )
 
     io.add_argument("--out","-o", required=False, metavar="TSV",
         help=(
@@ -344,6 +386,10 @@ def add_operon_args(p: argparse.ArgumentParser) -> None:
     out.add_argument("--write-gff", action="store_true", help=(
             "Write predicted operons as GFF features "
             "in addition to the TSV output."))
+
+    out.add_argument("--include-singletons", action="store_true", help=(
+            "Retain single-gene groups in the output. By default, only "
+            "multi-gene candidate operons are reported."))
 
     out.add_argument("--prefix", default=None,
         help=(

@@ -1,0 +1,17 @@
+sample	contig	contig_length	examined_fragments	junction_fragments	junction_alignments	one_tagged_mate	two_tagged_mates	high_confidence_fragments	low_confidence_fragments
+results_align_mapqfix	NC_000964.3	4215606	33405469	81	112				
+results_align_mapqfix	TOTAL	4215606	33405469	81	112	50	31	81	0
+results_align_mapqfix	NC_011916.1	4042929	11289810	43	58				
+results_align_mapqfix	TOTAL	4042929	11289810	43	58	28	15	15	28
+results_align_mapqfix	NC_000913.3	4641652	24450133	8	8				
+results_align_mapqfix	TOTAL	4641652	24450133	8	8	8	0	8	0
+results_align_mapqfix	NC_008596.1	6988209	31884180	684	992				
+results_align_mapqfix	TOTAL	6988209	31884180	684	992	376	308	682	2
+results_align_mapqfix	NC_002516.2	6264404	9127112	96	115				
+results_align_mapqfix	TOTAL	6264404	9127112	96	115	77	19	95	1
+results_align_mapqfix	NC_002745.2	2814816	2896205	0	0				
+results_align_mapqfix	NC_003140.1	24653	2896205	1	1				
+results_align_mapqfix	TOTAL	2839469	2896205	1	1	1	0	1	0
+results_align_mapqfix	NC_002505.1	2961149	10948058	12	14				
+results_align_mapqfix	NC_002506.1	1072315	10948058	19	25				
+results_align_mapqfix	TOTAL	4033464	10948058	31	39	23	8	31	0

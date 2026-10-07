@@ -36,7 +36,7 @@ def add_quantify_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("-b", "--bam", nargs="+", required=True, metavar="BAM",
         help="One or more coordinate-sorted paired-end BAM files.")
 
-    parser.add_argument("-g", "--gff", required=True, metavar="GFF", help="GFF3 annotation file.")
+    parser.add_argument("-g", "--gff", required=True, metavar="GFF", help="Plain-text or gzip-compressed GFF3 annotation file (.gff/.gff3 or .gz).")
 
     parser.add_argument("-o", "--out", required=False, metavar="TSV", help="Output quantification table.")
 

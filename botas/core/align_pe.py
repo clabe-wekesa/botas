@@ -8,6 +8,7 @@ import re
 
 from botas.core.slice import slice_reference
 from botas.core.align_core import Hit, align_read
+from botas.core.scoring import score_to_mapq
 from botas.core.utils import revcomp
 from botas.core.circular import (
     circ_dist,
@@ -161,12 +162,19 @@ def rescue_mate(
 
     query = mate_seq if mate_strand == "+" else revcomp(mate_seq)
 
+    slice_center0 = center0
+
+    if circular:
+        # center0 is in original circular coordinates, while ref_seq is
+        # the physically padded reference. Translate to padded coordinates.
+        slice_center0 = int(center0) + int(circular_overhang)
+
     ref_slice, slice_start = slice_reference(
         ref_seq=ref_seq,
-        center0=center0,
+        center0=slice_center0,
         read_len=len(query),
         pad=rescue_pad,
-        circular=circular,
+        circular=False,
     )
 
     if not ref_slice:
@@ -199,7 +207,7 @@ def rescue_mate(
         strand=mate_strand,
         cigar=cigar,
         ascore=-edits,
-        mapq=min(60, 30 + max(0, 30 - edits)),
+        mapq=score_to_mapq(-edits, read_len=len(query), second_score=None),
         junction=(
             circular
             and int(pos0) + _reference_span(cigar) > L
@@ -255,6 +263,8 @@ def align_pair_simple(
         pad=pad,
         max_windows=max_windows,
         min_seed_hits=min_seed_hits,
+        mapq_locus_len=L if circular else None,
+        mapq_locus_offset=circular_overhang if circular else 0,
     )
 
     # Common paired-end fast path: use a confident R1 alignment to place R2
@@ -311,6 +321,8 @@ def align_pair_simple(
         pad=pad,
         max_windows=max_windows,
         min_seed_hits=min_seed_hits,
+        mapq_locus_len=L if circular else None,
+        mapq_locus_offset=circular_overhang if circular else 0,
     )
 
     def _norm_hit(hit):

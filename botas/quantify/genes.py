@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Dict, Iterable, Mapping, Sequence, Tuple
 from urllib.parse import unquote
 import logging
+import gzip
 
 
 logger = logging.getLogger(__name__)
@@ -113,7 +114,8 @@ def load_gene_features_from_gff(
     Parameters
     ----------
     gff_path
-        Input GFF3 file.
+        Input plain-text or gzip-compressed GFF3 file. Compression is
+        detected from the file header, independently of the filename.
     feature_types
         GFF feature type or types to load, normally ``gene``.
     id_attribute
@@ -145,7 +147,12 @@ def load_gene_features_from_gff(
     matching_records = 0
     missing_identifier = 0
 
-    with path.open("r", encoding="utf-8") as handle:
+    # Inspect the gzip signature instead of relying on the filename suffix.
+    with path.open("rb") as probe:
+        is_gzip = probe.read(2) == b"\x1f\x8b"
+
+    opener = gzip.open if is_gzip else open
+    with opener(path, "rt", encoding="utf-8") as handle:
         for line_number, raw_line in enumerate(handle, start=1):
             line = raw_line.rstrip("\n")
 

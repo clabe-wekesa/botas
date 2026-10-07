@@ -1,28 +1,53 @@
 # botas/core/scoring.py
 from __future__ import annotations
 
-import math
+from typing import Optional
 
 
-def score_to_mapq(score: int, *, read_len: int, num_windows: int) -> int:
+def score_to_mapq(
+    score: int,
+    *,
+    read_len: int,
+    second_score: Optional[int] = None,
+) -> int:
     """
-    Simple MAPQ heuristic for early development.
+    Convert BOTAS Edlib alignment scores to a conservative 0..60 MAPQ heuristic.
 
-    - Higher parasail score → higher MAPQ
-    - More candidate windows → lower MAPQ (more ambiguity)
+    BOTAS defines alignment score as ``score = -edit_distance``; therefore an
+    exact match has score 0 and poorer alignments have increasingly negative
+    scores.
 
-    This is deliberately conservative and easy to replace later with
-    calibration (e.g., score gap between best/second-best).
+    MAPQ combines:
+      1. alignment quality, measured as 1 - edit_distance/read_len; and
+      2. separation from the second-best *distinct mapping locus*.
+
+    If a second-best locus has the same score as the best locus, MAPQ is 0.
+    If no second distinct locus is available, separation is treated as maximal.
+
+    This is a heuristic mapping-confidence score, not a calibrated Phred
+    probability of mapping error.
     """
-    if score <= 0 or read_len <= 0:
+    if read_len <= 0:
         return 0
 
-    # Normalize score by read length
-    s = score / max(1.0, float(read_len))
+    best_edits = max(0, -int(score))
+    edit_fraction = min(1.0, best_edits / float(read_len))
+    alignment_quality = 1.0 - edit_fraction
 
-    # Penalize ambiguity
-    amb_pen = math.log2(max(2, num_windows))  # 1 window ~ low penalty, many windows ~ higher penalty
+    if alignment_quality <= 0.0:
+        return 0
 
-    # Convert to 0..60 scale (rough)
-    mq = int(max(0.0, min(60.0, (s * 20.0) - (amb_pen * 5.0))))
-    return mq
+    if second_score is None:
+        separation = 1.0
+    else:
+        gap = int(score) - int(second_score)
+        if gap <= 0:
+            return 0
+
+        # A gap of 10% of read length (or more) receives full separation
+        # credit; smaller gaps are scaled linearly.
+        gap_scale = max(1.0, 0.10 * float(read_len))
+        separation = min(1.0, gap / gap_scale)
+
+    mq = round(60.0 * alignment_quality * separation)
+    return int(max(0, min(60, mq)))

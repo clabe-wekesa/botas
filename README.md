@@ -54,18 +54,6 @@ cd botas
 python -m pip install .
 ```
 
-To include the optional progress display:
-
-```bash
-python -m pip install ".[progress]"
-```
-
-For development:
-
-```bash
-python -m pip install -e ".[dev]"
-```
-
 ## Command overview
 
 ```text
@@ -92,19 +80,13 @@ botas getOperons --help
 For a linear reference:
 
 ```bash
-botas index \
-  -r genome.fna \
-  -o genome.botas.idx
+botas index -r genome.fna -o genome.botas.idx
 ```
 
 For a circular bacterial reference:
 
 ```bash
-botas index \
-  -r genome.fna \
-  --circular \
-  --circular-overhang-percent 5 \
-  -o genome.circular.botas.idx
+botas index -r genome.fna --circular --circular-overhang-percent 5 -o genome.circular.botas.idx
 ```
 
 Individual contigs can instead be marked as circular with `--circular-contigs`.
@@ -112,15 +94,7 @@ Individual contigs can instead be marked as circular with `--circular-contigs`.
 ### 2. Align paired-end reads
 
 ```bash
-botas -d analysis \
-  align \
-  -x genome.botas.idx \
-  -1 reads_R1.fastq.gz \
-  -2 reads_R2.fastq.gz \
-  -t 8 \
-  --pool \
-  --sort-bam \
-  -o sample.bam
+botas -d analysis align -x genome.botas.idx -1 reads_R1.fastq.gz -2 reads_R2.fastq.gz -t 8 --pool --sort-bam -o sample.bam
 ```
 
 With `--sort-bam`, BOTAS also creates a coordinate-sorted BAM and `.bai` index.
@@ -128,14 +102,7 @@ With `--sort-bam`, BOTAS also creates a coordinate-sorted BAM and `.bai` index.
 For single-end reads, use `--fq`:
 
 ```bash
-botas -d analysis \
-  align \
-  -x genome.botas.idx \
-  --fq reads.fastq.gz \
-  -t 8 \
-  --pool \
-  --sort-bam \
-  -o sample.bam
+botas -d analysis align -x genome.botas.idx --fq reads.fastq.gz -t 8 --pool --sort-bam -o sample.bam
 ```
 
 BOTAS can also align directly from a FASTA reference using `-r/--ref`, although a saved BOTAS index is preferable for repeated analyses.
@@ -143,11 +110,7 @@ BOTAS can also align directly from a FASTA reference using `-r/--ref`, although 
 ### 3. Quantify gene expression
 
 ```bash
-botas -d analysis \
-  quantify \
-  -b analysis/results/sample.sorted.bam \
-  -g genome.gff \
-  -o sample_counts.tsv
+botas quantify -b analysis/results/sample.sorted.bam -g genome.gff -o sample_counts.tsv
 ```
 
 The default feature type is `gene`, and the default identifier attribute for genes is `locus_tag`.
@@ -155,24 +118,13 @@ The default feature type is `gene`, and the default identifier attribute for gen
 BOTAS can also quantify operon features:
 
 ```bash
-botas -d analysis \
-  quantify \
-  -b analysis/results/sample.sorted.bam \
-  -g operons.gff \
-  --feature-type operon \
-  --id-attribute ID \
-  -o operon_counts.tsv
+botas quantify -b analysis/results/sample.sorted.bam -g operons.gff --feature-type operon --id-attribute ID -o operon_counts.tsv -d analysis
 ```
 
 ### 4. Infer operons
 
 ```bash
-botas -d analysis \
-  getOperons \
-  -b analysis/results/sample.sorted.bam \
-  -g genome.gff \
-  -t 8 \
-  --write-gff
+botas getOperons -b analysis/results/sample.sorted.bam -g genome.gff -t 8 --write-gff
 ```
 
 Operon inference uses genomic adjacency, strand consistency, and RNA-seq coverage coherence. Multiple BAM files can be analyzed independently or combined using `--consensus`.
@@ -185,18 +137,10 @@ Official BOTAS container images are published through GitHub Container Registry:
 ghcr.io/clabe-wekesa/botas
 ```
 
-For reproducible analyses, use a specific release tag rather than `latest`.
-
-### Pull the image
-
-```bash
-docker pull ghcr.io/clabe-wekesa/botas:0.1.6
-```
-
 Test it:
 
 ```bash
-docker run --rm ghcr.io/clabe-wekesa/botas:0.1.6 --help
+docker run --rm ghcr.io/clabe-wekesa/botas:0.x.y --help
 ```
 
 ### Run BOTAS on local files
@@ -204,13 +148,7 @@ docker run --rm ghcr.io/clabe-wekesa/botas:0.1.6 --help
 Mount the current analysis directory at `/work` inside the container:
 
 ```bash
-docker run --rm \
-  --user "$(id -u):$(id -g)" \
-  -v "$PWD:/work" \
-  ghcr.io/clabe-wekesa/botas:0.1.6 \
-  index \
-  -r /work/genome.fna \
-  -o /work/genome.botas.idx
+docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/work" ghcr.io/clabe-wekesa/botas:0.x.y index -r /work/genome.fna -o /work/genome.botas.idx
 ```
 
 The `--user` option is recommended on Linux so files created by Docker remain owned by the current user.
@@ -218,19 +156,7 @@ The `--user` option is recommended on Linux so files created by Docker remain ow
 A paired-end alignment can then be run as:
 
 ```bash
-docker run --rm \
-  --user "$(id -u):$(id -g)" \
-  -v "$PWD:/work" \
-  ghcr.io/clabe-wekesa/botas:0.1.6 \
-  -d /work/analysis \
-  align \
-  -x /work/genome.botas.idx \
-  -1 /work/reads_R1.fastq.gz \
-  -2 /work/reads_R2.fastq.gz \
-  -t 8 \
-  --pool \
-  --sort-bam \
-  -o sample.bam
+docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/work" ghcr.io/clabe-wekesa/botas:0.x.y -d /work/analysis align -x /work/genome.botas.idx -1 /work/reads_R1.fastq.gz -2 /work/reads_R2.fastq.gz -t 8 --pool --sort-bam -o sample.bam
 ```
 
 ### Build the image locally
@@ -238,8 +164,8 @@ docker run --rm \
 From the BOTAS repository root:
 
 ```bash
-docker build -t botas:0.1.6 .
-docker run --rm botas:0.1.6 --help
+docker build -t botas:0.x.y .
+docker run --rm botas:0.x.y --help
 ```
 
 ## Apptainer / Singularity
@@ -249,25 +175,20 @@ Apptainer can consume the same public GHCR image, so no separate container defin
 ### Pull a SIF image
 
 ```bash
-apptainer pull botas_0.1.6.sif \
+apptainer pull botas_0.x.y.sif \
   docker://ghcr.io/clabe-wekesa/botas:0.1.6
 ```
 
 Test it:
 
 ```bash
-apptainer exec botas_0.1.6.sif botas --help
+apptainer exec botas_0.x.y.sif botas --help
 ```
 
 ### Run with local data
 
 ```bash
-apptainer exec \
-  --bind "$PWD:/work" \
-  botas_0.1.6.sif \
-  botas index \
-  -r /work/genome.fna \
-  -o /work/genome.botas.idx
+apptainer exec --bind "$PWD:/work" botas_0.x.y.sif botas index -r /work/genome.fna -o /work/genome.botas.idx
 ```
 
 This workflow is particularly useful on HPC systems where Apptainer or Singularity is available but users do not have permission to install system-wide software.
@@ -297,22 +218,6 @@ botas/
 ```
 
 The alignment engine includes k-mer/minimizer indexing, seed clustering, edit-distance extension using `edlib`, CIGAR construction, pairing logic, MAPQ scoring, and circular-coordinate handling.
-
-## Reproducibility
-
-For reproducible analyses, record the BOTAS version used:
-
-```bash
-botas --version
-```
-
-For containerized analyses, pin the image tag, for example:
-
-```text
-ghcr.io/clabe-wekesa/botas:0.1.6
-```
-
-rather than relying on `latest`.
 
 ## Citation
 

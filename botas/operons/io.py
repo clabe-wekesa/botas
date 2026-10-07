@@ -1,63 +1,126 @@
-import pysam
 import math
 from concurrent.futures import ProcessPoolExecutor, as_completed
+from urllib.parse import unquote
+
+import pysam
+
 from botas.operons.classifier import operon_score, operon_confidence
 
 
+DISPLAY_ID_CHOICES = ("gene", "locus_tag", "Name", "ID")
+
+
 def _parse_attrs(attr_str):
-    d = {}
+    """Parse GFF3 attributes into a decoded dictionary."""
+    attrs = {}
     for item in attr_str.split(";"):
+        item = item.strip()
         if not item or "=" not in item:
             continue
-        k, v = item.split("=", 1)
-        d[k.strip()] = v.strip()
-    return d
+        key, value = item.split("=", 1)
+        attrs[key.strip()] = unquote(value.strip())
+    return attrs
 
 
-def _pick_id(attrs):
-    return (
-        attrs.get("ID")
-        or attrs.get("locus_tag")
-        or attrs.get("gene")
-        or attrs.get("Name")
-        or "unknown"
-    )
+def _first_nonempty(attrs, keys):
+    for key in keys:
+        value = attrs.get(key)
+        if value:
+            return value
+    return None
 
 
-def load_genes(gff_path, feature_types=("gene",)):
+def _pick_display_id(attrs, preferred="gene"):
+    """Choose the user-facing identifier, preferring the requested GFF field."""
+    if preferred not in DISPLAY_ID_CHOICES:
+        raise ValueError(
+            f"Unsupported gene identifier {preferred!r}; "
+            f"choose one of {', '.join(DISPLAY_ID_CHOICES)}"
+        )
+
+    fallback = ["gene", "locus_tag", "Name", "ID"]
+    ordered = [preferred] + [key for key in fallback if key != preferred]
+    return _first_nonempty(attrs, ordered) or "unknown"
+
+
+def _pick_internal_id(attrs, chrom, start, end, strand, row_number):
+    """
+    Return a stable internal key for coverage and pair bookkeeping.
+
+    This is deliberately independent of the user-facing identifier so that
+    duplicate gene symbols (or missing gene names) cannot overwrite coverage.
+    """
+    base = _first_nonempty(attrs, ("ID", "locus_tag"))
+    if base:
+        return base
+    return f"{chrom}:{start}-{end}:{strand}:row{row_number}"
+
+
+def load_genes(gff_path, feature_types=("gene",), id_attribute="gene"):
+    """
+    Load GFF3 gene features.
+
+    ``internal_id`` is used for all computation. ``display_id`` is the value
+    shown in output and is controlled by ``id_attribute``.
+    """
     genes = []
+    seen_internal = set()
+
     with open(gff_path, "r", encoding="utf-8") as fh:
-        for line in fh:
-            if not line or line.startswith("#"):
+        for row_number, line in enumerate(fh, 1):
+            if not line.strip() or line.startswith("#"):
                 continue
+
             fields = line.rstrip("\n").split("\t")
             if len(fields) != 9:
                 continue
-            chrom, _, ftype, start, end, _, strand, _, attrs_s = fields
+
+            chrom, _, ftype, start_s, end_s, _, strand, _, attrs_s = fields
             if ftype not in feature_types:
                 continue
+            if strand not in {"+", "-"}:
+                continue
+
+            start = int(start_s)
+            end = int(end_s)
             attrs = _parse_attrs(attrs_s)
-            gid = _pick_id(attrs)
+
+            internal_id = _pick_internal_id(
+                attrs,
+                chrom=chrom,
+                start=start,
+                end=end,
+                strand=strand,
+                row_number=row_number,
+            )
+
+            # IDs in malformed GFF files are sometimes duplicated. Preserve
+            # every feature without allowing one gene to overwrite another.
+            if internal_id in seen_internal:
+                internal_id = f"{internal_id}#{chrom}:{start}-{end}:{strand}"
+            seen_internal.add(internal_id)
+
             genes.append(
                 {
                     "chrom": chrom,
-                    "start": int(start),
-                    "end": int(end),
+                    "start": start,
+                    "end": end,
                     "strand": strand,
-                    "id": gid,
+                    "internal_id": internal_id,
+                    "display_id": _pick_display_id(attrs, preferred=id_attribute),
+                    "gene": attrs.get("gene"),
+                    "locus_tag": attrs.get("locus_tag"),
+                    "gff_id": attrs.get("ID"),
+                    "name": attrs.get("Name"),
                 }
             )
+
     return genes
 
 
 def _cov_one_region(bam_path, contig, region_start, region_end, genes):
-    """
-    Calculate partial gene depth within one non-overlapping genomic region.
-
-    region_start and region_end use 0-based, half-open coordinates,
-    as required by pysam.
-    """
-    partial_depth = {g["id"]: 0 for g in genes}
+    """Calculate partial gene depth within one non-overlapping region."""
+    partial_depth = {g["internal_id"]: 0 for g in genes}
 
     with pysam.AlignmentFile(bam_path, "rb") as bam:
         if contig not in bam.references:
@@ -71,23 +134,17 @@ def _cov_one_region(bam_path, contig, region_start, region_end, genes):
             stepper="all",
             min_base_quality=0,
         ):
-            # Convert pysam's 0-based position to GFF's 1-based position.
             pos = col.reference_pos + 1
             depth = col.nsegments
 
             for gene in genes:
                 if gene["start"] <= pos <= gene["end"]:
-                    partial_depth[gene["id"]] += depth
+                    partial_depth[gene["internal_id"]] += depth
 
     return partial_depth
 
 
 def _make_coverage_tasks(by_contig, window_size):
-    """
-    Divide every contig into non-overlapping windows.
-
-    Only genes overlapping a window are included in that task.
-    """
     tasks = []
 
     for contig, genes in by_contig.items():
@@ -96,13 +153,10 @@ def _make_coverage_tasks(by_contig, window_size):
 
         first_position = min(g["start"] for g in genes)
         last_position = max(g["end"] for g in genes)
-
-        # Convert the GFF 1-based start to a pysam 0-based start.
         region_start = first_position - 1
 
         while region_start < last_position:
             region_end = min(region_start + window_size, last_position)
-
             overlapping_genes = [
                 g
                 for g in genes
@@ -110,50 +164,29 @@ def _make_coverage_tasks(by_contig, window_size):
             ]
 
             if overlapping_genes:
-                tasks.append(
-                    (
-                        contig,
-                        region_start,
-                        region_end,
-                        overlapping_genes,
-                    )
-                )
+                tasks.append((contig, region_start, region_end, overlapping_genes))
 
             region_start = region_end
 
     return tasks
 
 
-def compute_gene_coverage(
-    bam_path,
-    genes,
-    max_workers=None,
-    window_size=250_000,
-):
-    """
-    Calculate mean coverage for every gene.
-
-    Coverage is parallelized across non-overlapping genomic windows.
-    """
+def compute_gene_coverage(bam_path, genes, max_workers=None, window_size=250_000):
+    """Calculate mean per-base coverage for every gene."""
     by_contig = {}
-
     for gene in genes:
         by_contig.setdefault(gene["chrom"], []).append(gene)
 
     for contig_genes in by_contig.values():
         contig_genes.sort(key=lambda gene: gene["start"])
 
-    total_depth = {gene["id"]: 0 for gene in genes}
-
+    total_depth = {gene["internal_id"]: 0 for gene in genes}
     gene_len = {
-        gene["id"]: max(1, gene["end"] - gene["start"] + 1)
+        gene["internal_id"]: max(1, gene["end"] - gene["start"] + 1)
         for gene in genes
     }
 
-    tasks = _make_coverage_tasks(
-        by_contig=by_contig,
-        window_size=window_size,
-    )
+    tasks = _make_coverage_tasks(by_contig=by_contig, window_size=window_size)
 
     print(
         f"[coverage] {len(genes)} genes, "
@@ -164,16 +197,10 @@ def compute_gene_coverage(
     if max_workers == 1:
         for contig, start, end, region_genes in tasks:
             partial_depth = _cov_one_region(
-                bam_path,
-                contig,
-                start,
-                end,
-                region_genes,
+                bam_path, contig, start, end, region_genes
             )
-
             for gene_id, depth in partial_depth.items():
                 total_depth[gene_id] += depth
-
     else:
         with ProcessPoolExecutor(max_workers=max_workers) as executor:
             futures = [
@@ -190,7 +217,6 @@ def compute_gene_coverage(
 
             for future in as_completed(futures):
                 partial_depth = future.result()
-
                 for gene_id, depth in partial_depth.items():
                     total_depth[gene_id] += depth
 
@@ -204,7 +230,7 @@ def operon_stats(genes, cov):
     if not genes:
         return 0.0, 0.0, 0.0
 
-    covs = [cov.get(g["id"], 0.0) for g in genes]
+    covs = [cov.get(g["internal_id"], 0.0) for g in genes]
     mean = sum(covs) / len(covs)
     mn = min(covs)
 
@@ -216,13 +242,7 @@ def operon_stats(genes, cov):
     return mean, mn, cv
 
 
-def write_operons_gff(
-    path,
-    operons,
-    cov,
-    max_igd,
-    attribute_prefix="",
-):
+def write_operons_gff(path, operons, cov, max_igd, attribute_prefix=""):
     from botas.operons.features import operon_igds
     from botas.operons.classifier import operon_score
 
@@ -242,7 +262,7 @@ def write_operons_gff(
             attrs = (
                 f"ID=operon_{i};"
                 f"n_genes={len(op)};"
-                f"genes={','.join(g['id'] for g in op)};"
+                f"genes={','.join(g['display_id'] for g in op)};"
                 f"{attribute_prefix}mean_cov={mean_cov:.3f};"
                 f"{attribute_prefix}score={score:.3f};"
                 f"{attribute_prefix}confidence={conf}"

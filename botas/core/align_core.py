@@ -151,6 +151,8 @@ def align_read(
     min_seed_hits: int = 2,
     threads: int = 1,
     strands: tuple[str, ...] = ("+", "-"),
+    mapq_locus_len: int | None = None,
+    mapq_locus_offset: int = 0,
 ) -> Optional[Hit]:
 
     global _PROF_READS, _PROF_WINDOWS
@@ -164,6 +166,7 @@ def align_read(
 
     best: Optional[_Candidate] = None
     best_tie: Optional[Tuple[int, int, int]] = None
+    evaluated_candidates: List[_Candidate] = []
 
     strand_queries = []
 
@@ -222,6 +225,7 @@ def align_read(
                 continue
 
             cand, cur_tie = res
+            evaluated_candidates.append(cand)
 
             if best is None or cand.score > best.score:
                 best = cand
@@ -243,10 +247,45 @@ def align_read(
         if pos0 < 0 or pos0 >= L:
             return None
 
+    # Estimate ambiguity from the second-best distinct biological locus.
+    # Overlapping windows -- and, for an unrolled circular reference, duplicate
+    # padded copies of the same circular locus -- must not compete with each
+    # other for MAPQ.
+    def _mapq_locus_key(strand: str, raw_pos0: int):
+        if mapq_locus_len is not None:
+            locus_len = int(mapq_locus_len)
+            if locus_len <= 0:
+                raise ValueError("mapq_locus_len must be > 0")
+            norm_pos0 = (int(raw_pos0) - int(mapq_locus_offset)) % locus_len
+            return (strand, norm_pos0)
+        if circular:
+            return (strand, int(raw_pos0) % L)
+        return (strand, int(raw_pos0))
+
+    best_key = _mapq_locus_key(best.strand, int(pos0))
+    second_score = None
+
+    for cand in evaluated_candidates:
+        lead2 = ref_leading_consumption(cand.cigar)
+        cand_pos0 = cand.slice_start + cand.ref_beg + lead2
+
+        if mapq_locus_len is None:
+            if circular:
+                cand_pos0 %= L
+            elif cand_pos0 < 0 or cand_pos0 >= L:
+                continue
+
+        cand_key = _mapq_locus_key(cand.strand, int(cand_pos0))
+        if cand_key == best_key:
+            continue
+
+        if second_score is None or cand.score > second_score:
+            second_score = int(cand.score)
+
     mq = score_to_mapq(
         best.score,
         read_len=len(read_seq),
-        num_windows=1,
+        second_score=second_score,
     )
 
     return Hit(

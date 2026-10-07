@@ -251,7 +251,7 @@ def run_index(args: argparse.Namespace) -> int:
         args.ref,
         k=args.kmer,
         w=args.window,
-        circular=args.circular,
+        circular=bool(args.circular or circular_contigs),
         circular_contigs=circular_contigs,
         circular_overhang_percent=args.circular_overhang_percent,
     )
@@ -270,7 +270,7 @@ def run_index(args: argparse.Namespace) -> int:
     print(f"[botas index] k              : {args.kmer}")
     print(f"[botas index] w              : {args.window}")
 
-    if args.circular:
+    if args.circular or circular_contigs:
         print(f"[botas index] circ overhang %: {args.circular_overhang_percent}")
     else:
         print("[botas index] circ overhang %: disabled (linear reference)")
@@ -448,8 +448,8 @@ def add_align_args(al: argparse.ArgumentParser) -> None:
                             "If not provided, a curated bundled database is used."))
     rrna.add_argument("--rrna-k", type=int, default=18, metavar="K",
                       help="k-mer size for rRNA detection (default: 18).")
-    rrna.add_argument("--rrna-min-hits", type=int, default=50, metavar="N",
-                      help="Minimum shared rRNA k-mers to classify as rRNA (default: 50).")
+    rrna.add_argument("--rrna-min-hits", type=int, default=10, metavar="N",
+                      help="Minimum shared rRNA k-mers to classify as rRNA (default: 10).")
 
     # =========================================================
     # Logging
@@ -502,6 +502,10 @@ def run_align(args) -> int:
         return 2
 
     # 4) Load reference/index
+    # --circular means all contigs; --circular-contigs means only the named contigs.
+    requested_circular_contigs = set(getattr(args, "circular_contigs", None) or [])
+    circular_requested = bool(args.circular or requested_circular_contigs)
+
     using_botas_index = args.index is not None
 
     if using_botas_index:
@@ -518,6 +522,14 @@ def run_align(args) -> int:
                 return len(self._contigs)
 
         for c in idx_obj.contigs:
+            requested_for_contig = bool(args.circular) or c.name in requested_circular_contigs
+            if requested_for_contig and not c.circular:
+                raise ValueError(
+                    f"Contig {c.name!r} was requested as circular, but the supplied "
+                    "BOTAS index was built as linear. Rebuild that index with the "
+                    "same circular settings used for alignment."
+                )
+
             c.index = BotasIntIndexAdapter(
                 seq=c.seq,
                 index=c.index,
@@ -539,7 +551,7 @@ def run_align(args) -> int:
 
         refset = load_reference_set(
             args.ref,
-            circular=args.circular,
+            circular=circular_requested,
             circular_contigs=getattr(args, "circular_contigs", None),
             circular_overhang_percent=args.circular_overhang_percent,
         )
