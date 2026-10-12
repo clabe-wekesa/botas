@@ -1,0 +1,2 @@
+sample	gff	botas_operons	rockhopper_operons
+sampleA	/path/to/sampleA.gff3	/path/to/botas_operons.tsv	/path/to/_operons.txt

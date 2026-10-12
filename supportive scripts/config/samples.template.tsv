@@ -1,0 +1,2 @@
+sample	r1	r2	reference	gff
+sampleA	/path/to/sampleA_R1.fastq.gz	/path/to/sampleA_R2.fastq.gz	/path/to/sampleA.fna	/path/to/sampleA.gff3

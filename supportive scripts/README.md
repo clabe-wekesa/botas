@@ -1,583 +1,624 @@
-# BOTAS manuscript supplementary data and benchmarking scripts
+# BOTAS manuscript reproducibility scripts
 
-This repository contains the simulated datasets, evaluation scripts, and benchmarking workflows used in the manuscript describing **BOTAS**, a bacterial RNA-seq analysis framework.
+This package contains the scripts required to reproduce the analyses reported in the BOTAS manuscript. The executable scripts do **not** contain fixed sample names, absolute paths, or manuscript-specific directory names. Input datasets are supplied through command-line arguments or tab-separated manifest files, so the same scripts can be used with the manuscript datasets or with other bacterial RNA-Seq datasets.
 
-The archive is intended to complement the BOTAS software repository by providing the data and analysis procedures required to reproduce the benchmarking analyses reported in the manuscript.
+The manuscript-specific SRA accessions and RefSeq assemblies are stored separately under `config/`. These are data manifests, not hard-coded logic in the analysis scripts.
 
-## BOTAS software
+## 1. Requirements
 
-BOTAS itself is distributed separately from this supplementary archive.
+The complete workflow uses the following programs, depending on the analysis being reproduced:
 
-The analyses in this archive require an installed version of BOTAS together with the external programs used for individual benchmarking comparisons.
-
----
-
-## Archive structure
-
-```text
-.
-├── botas_manuscript_data/
-│   └── simulated/
-│       ├── circular_wrap/
-│       │   ├── ecoli/
-│       │   ├── rphaseoli/
-│       │   └── rphaseoli_se/
-│       ├── standard_pe/
-│       │   ├── ecoli/
-│       │   └── rphaseoli/
-│       └── standard_se/
-│           └── rphaseoli/
-│
-├── botas_manuscript_scripts/
-│   ├── benchmark_operon_links_unordered.py
-│   ├── compare_botas_featurecounts.py
-│   ├── evaluate_pe_bam.py
-│   ├── evaluate_se_bam.py
-│   ├── extract_regulondb_operon_links.py
-│   ├── plot_operon_benchmark.py
-│   ├── prepare_rphaseoli_circular_truth.py
-│   ├── run_final_ecoli_circular_pe.sh
-│   ├── run_final_ecoli_standard_pe_updated.sh
-│   ├── run_final_rphaseoli_circular_pe.sh
-│   ├── run_final_rphaseoli_standard_pe.sh
-│   ├── run_final_rphaseoli_standard_se.sh
-│   ├── run_quantification_benchmark.sh
-│   ├── simulate_rphaseoli_circular_wrap.py
-│   └── simulate_rphaseoli_circular_wrap_se.py
-│
-├── references/
-├── index/
-└── results/
-```
-
-The `references/`, `index/`, and `results/` directories are used by the benchmarking scripts. Reference genomes and external datasets should be obtained from the sources described in the manuscript and placed at the locations indicated below.
-
----
-
-# 1. Requirements
-
-The scripts were developed for a Linux environment.
-
-The main software requirements are:
-
+- Python 3.9 or newer
 - BOTAS
-- Python 3
-- pysam
-- pandas
-- NumPy
-- SciPy
-- scikit-learn
-- matplotlib
-- pymongo/BSON support
 - samtools
+- SRA Toolkit (`fasterq-dump`)
+- curl
+- ART/ART Modern (`art_modern`)
+- bedtools
 - Bowtie2
 - BWA-MEM2
-- Minimap2
-- HISAT2
-- STAR
-- featureCounts
+- minimap2
+- SortMeRNA
+- RiboDetector (`ribodetector_cpu`)
+- Subread/featureCounts
+- HTSeq
+- Java and Rockhopper
 
-GNU `/usr/bin/time` is used for runtime and peak-memory measurements.
+Python scripts that inspect BAM files require `pysam`.
 
-The benchmarking shell scripts use six threads by default. The number of threads can be changed using the `THREADS` environment variable, for example:
-
-```bash
-THREADS=8 ./botas_manuscript_scripts/run_final_ecoli_standard_pe_updated.sh
-```
-
----
-
-# 2. Reference genomes
-
-The benchmarking workflows expect the following directory structure:
-
-```text
-references/
-├── ecoli/
-│   ├── genome.fa
-│   └── annotation.gff
-└── rphaseoli/
-    └── genome.fa
-```
-
-The *Escherichia coli* and *Rhizobium phaseoli* reference sequences used for the manuscript analyses are described in the Methods section of the manuscript.
-
-The *R. phaseoli* reference corresponds to strain R650, which contains one chromosome and four plasmids.
-
----
-
-# 3. Simulated datasets
-
-The simulated reads used for alignment benchmarking are included under:
-
-```text
-botas_manuscript_data/simulated/
-```
-
-Three principal benchmark types are represented:
-
-```text
-standard_pe/
-circular_wrap/
-standard_se/
-```
-
-`standard_pe` contains conventional paired-end simulated reads distributed across the reference genome.
-
-`circular_wrap` contains reads or fragments specifically designed to cross the end/origin boundary of circular bacterial replicons.
-
-`standard_se` contains the single-end benchmark dataset.
-
-The corresponding truth tables contain the expected reference sequence and genomic alignment positions used to evaluate mapping accuracy.
-
----
-
-# 4. Paired-end alignment evaluation
-
-Paired-end BAM files are evaluated with:
-
-```text
-botas_manuscript_scripts/evaluate_pe_bam.py
-```
-
-The evaluator compares primary alignments with the expected reference sequence and genomic start position in the truth table.
-
-An alignment is considered correct when:
-
-1. it maps to the expected reference sequence; and
-2. its start position is within the specified positional tolerance.
-
-The default tolerance is 10 bp.
-
-Secondary and supplementary alignments are excluded.
-
-The script reports:
-
-- total read pairs;
-- total reads;
-- mapped reads;
-- correctly mapped reads;
-- incorrectly mapped reads;
-- unmapped reads;
-- precision;
-- recall; and
-- F1 score.
-
-Example:
+Record the installed versions before starting:
 
 ```bash
-python botas_manuscript_scripts/evaluate_pe_bam.py \
-    --bam results/alignment/ecoli_standard_pe/bowtie2.bam \
-    --truth botas_manuscript_data/simulated/standard_pe/ecoli/ecoli_20x_truth.tsv \
-    --out results/metrics/ecoli_standard_pe/bowtie2.metrics.tsv \
+bash 00_setup/capture_versions.sh software_versions.txt
+```
+
+## 2. Manifest files
+
+Most scripts operate on TSV manifests. Paths may be absolute or relative to the directory from which the command is executed.
+
+### 2.1 Experimental sample manifest
+
+The principal manifest has five columns:
+
+```text
+sample    r1    r2    reference    gff
+```
+
+An example is provided as `config/samples.template.tsv`.
+
+`sample` is an arbitrary unique sample label. `r1` and `r2` are paired-end FASTQ files. `reference` is the reference FASTA used for alignment. `gff` is the corresponding GFF3 annotation.
+
+### 2.2 BAM manifest
+
+Downstream quantification and operon scripts use:
+
+```text
+sample    bam    gff    reference
+```
+
+An example is provided as `config/bams.template.tsv`.
+
+### 2.3 Manuscript-specific accession manifests
+
+The exact SRA runs are in:
+
+```text
+config/manuscript_sra.tsv
+```
+
+The exact RefSeq assemblies are in:
+
+```text
+config/manuscript_references.tsv
+```
+
+These files can be replaced with manifests for any other samples without editing the scripts.
+
+## 3. Download the manuscript data
+
+Create a working directory first:
+
+```bash
+mkdir -p work
+```
+
+### 3.1 Download the seven paired-end SRA datasets
+
+```bash
+python3 00_setup/download_sra.py \
+    --manifest config/manuscript_sra.tsv \
+    --outdir work/fastq \
+    --threads 16
+```
+
+The output files are named from the `sample` column of the manifest, for example:
+
+```text
+work/fastq/B_subtilis_168_1.fastq.gz
+work/fastq/B_subtilis_168_2.fastq.gz
+```
+
+The same downloader can be used for any paired-end SRA runs by supplying another TSV with columns `sample` and `sra`.
+
+### 3.2 Download the version-pinned reference genomes and GFF3 files
+
+```bash
+python3 00_setup/prepare_references.py \
+    --manifest config/manuscript_references.tsv \
+    --out work/references
+```
+
+Each sample receives its own directory containing the prepared FASTA and GFF3 files. Checksums and reference metadata are written to `work/references/references.tsv` and `work/references/replicons.tsv`.
+
+### 3.3 Build the analysis sample manifest
+
+```bash
+python3 00_setup/build_samples_manifest.py \
+    --samples config/manuscript_sra.tsv \
+    --fastq-dir work/fastq \
+    --reference-dir work/references \
+    --output work/samples.tsv
+```
+
+Inspect the file before running benchmarks:
+
+```bash
+column -t -s $'\t' work/samples.tsv
+```
+
+## 4. Table 1: rRNA filtering
+
+The manuscript uses BOTAS with `k = 18` and `H_min = 10`. Both parameters are passed explicitly below so the reproduction does not depend on a future software default.
+
+### 4.1 Build the truth-aware simulated rRNA benchmark
+
+```bash
+bash 01_rrna/build_rrna_benchmark.sh \
+    --manifest work/samples.tsv \
+    --outdir work/rrna_sim \
+    --rrna-pairs 50000 \
+    --non-rrna-pairs 50000 \
+    --read-length 150 \
+    --insert-mean 300 \
+    --insert-sd 50 \
+    --threads 16
+```
+
+This produces, for every sample, 50,000 canonical-rRNA read pairs and 50,000 non-rRNA read pairs together with a truth table.
+
+Build a manifest for those simulated FASTQ files:
+
+```bash
+python3 01_rrna/build_rrna_sim_manifest.py \
+    --source-manifest work/samples.tsv \
+    --benchmark-dir work/rrna_sim \
+    --output work/rrna_sim_samples.tsv
+```
+
+### 4.2 Run BOTAS on the simulated benchmark
+
+```bash
+python3 01_rrna/run_rrna_tools.py \
+    --tool botas \
+    --manifest work/rrna_sim_samples.tsv \
+    --outdir work/rrna_tools \
+    --threads 16 \
+    --rrna-k 18 \
+    --rrna-min-hits 10
+```
+
+### 4.3 Run SortMeRNA
+
+Supply the FASTA used as the SortMeRNA rRNA reference database:
+
+```bash
+python3 01_rrna/run_rrna_tools.py \
+    --tool sortmerna \
+    --manifest work/rrna_sim_samples.tsv \
+    --outdir work/rrna_tools \
+    --rrna-ref /path/to/sortmerna_rRNA_database.fasta \
+    --threads 16
+```
+
+### 4.4 Run RiboDetector
+
+```bash
+python3 01_rrna/run_rrna_tools.py \
+    --tool ribodetector \
+    --manifest work/rrna_sim_samples.tsv \
+    --outdir work/rrna_tools \
+    --read-length 150 \
+    --threads 16
+```
+
+Each invocation writes an output manifest such as:
+
+```text
+work/rrna_tools/botas_outputs.tsv
+work/rrna_tools/sortmerna_outputs.tsv
+work/rrna_tools/ribodetector_outputs.tsv
+```
+
+### 4.5 Score the simulated rRNA benchmark
+
+BOTAS:
+
+```bash
+python3 01_rrna/score_rrna.py \
+    --truth-manifest work/rrna_sim_samples.tsv \
+    --predictions-manifest work/rrna_tools/botas_outputs.tsv \
+    --output work/rrna_tools/botas_metrics.tsv
+```
+
+SortMeRNA:
+
+```bash
+python3 01_rrna/score_rrna.py \
+    --truth-manifest work/rrna_sim_samples.tsv \
+    --predictions-manifest work/rrna_tools/sortmerna_outputs.tsv \
+    --output work/rrna_tools/sortmerna_metrics.tsv
+```
+
+RiboDetector:
+
+```bash
+python3 01_rrna/score_rrna.py \
+    --truth-manifest work/rrna_sim_samples.tsv \
+    --predictions-manifest work/rrna_tools/ribodetector_outputs.tsv \
+    --output work/rrna_tools/ribodetector_metrics.tsv
+```
+
+### 4.6 Experimental rRNA filtering
+
+Run the same three tools using `work/samples.tsv` instead of the simulated manifest. For BOTAS:
+
+```bash
+python3 01_rrna/run_rrna_tools.py \
+    --tool botas \
+    --manifest work/samples.tsv \
+    --outdir work/rrna_experimental \
+    --threads 16 \
+    --rrna-k 18 \
+    --rrna-min-hits 10
+```
+
+The SortMeRNA and RiboDetector commands are identical to those above except for the input manifest and output directory. Experimental data do not have a truth table, so these runs are summarized by the number or percentage of read pairs classified as rRNA-like rather than by precision, recall, or F1. For each tool, summarize the run using its output manifest. For example, for BOTAS:
+
+```bash
+python3 01_rrna/summarize_rrna_experimental.py \
+    --samples work/samples.tsv \
+    --predictions-manifest work/rrna_experimental/botas_outputs.tsv \
+    --output work/rrna_experimental/botas_summary.tsv
+```
+
+Repeat with `sortmerna_outputs.tsv` and `ribodetector_outputs.tsv` for the other tools.
+
+## 5. Table 2: truth-aware simulated alignment benchmark
+
+The simulation/alignment driver accepts any directory containing FASTA files. It recursively searches the supplied directory; sample names are derived from FASTA filenames.
+
+For the manuscript design:
+
+```bash
+bash 02_alignment_simulated/run_all_alignment_benchmarks.sh \
+    --reference-dir work/references \
+    --outdir work/alignment_simulated \
+    --threads 16 \
+    --total-pairs 1000000 \
+    --junction-pairs 100000 \
+    --iterations 10 \
+    --read-length 150 \
+    --seed 12345 \
+    --tolerance 10 \
+    --overhang-percent 5
+```
+
+The principal outputs are:
+
+```text
+work/alignment_simulated/master_alignment_metrics.tsv
+work/alignment_simulated/master_resource_usage.tsv
+work/alignment_simulated/master_flagstat.tsv
+```
+
+### 5.1 `readSimulator_truth_1M.py`: generate truth-aware paired-end data
+
+This script is the foundation of the simulated alignment benchmark. It accepts any FASTA containing one or more circular replicons, generates paired-end reads with classic ART, and writes both FASTQ files and the mate-level truth table used for accuracy evaluation.
+
+For the manuscript-style design:
+
+```bash
+python3 02_alignment_simulated/readSimulator_truth_1M.py \
+    --input work/references/E_coli_K12/reference.fna \
+    --outdir work/simulated/E_coli_K12 \
+    --iterations 10 \
+    --readlen 150 \
+    --total-pairs 1000000 \
+    --junction-pairs 100000 \
+    --opts "-m 300 -s 30" \
+    --seed 12345
+```
+
+If `art_illumina` is not available as `art` on `PATH`, provide the executable explicitly with `--simulator_path /path/to/art_illumina`.
+
+Important arguments:
+
+| Argument | Meaning |
+|---|---|
+| `--input` | FASTA containing the circular replicon(s) to simulate |
+| `--simulator_path` | ART executable; default `art` |
+| `--outdir` | Output directory |
+| `--iterations` | Number of random whole-replicon rotations used for background simulation |
+| `--readlen` | Read length in bp |
+| `--total-pairs` | Exact number of read pairs in the final dataset |
+| `--junction-pairs` | Number of truth-confirmed origin-spanning challenge pairs retained in the final dataset |
+| `--opts` | Additional paired-end ART options; the manuscript uses `"-m 300 -s 30"` |
+| `--seed` | Random seed for reproducibility |
+
+For an input FASTA named `reference.fna`, principal outputs include:
+
+```text
+reference_1.fastq
+reference_2.fastq
+reference_truth.tsv
+```
+
+The truth TSV contains the expected reference sequence, 1-based start coordinate, strand and origin-crossing status for each mate, together with the reference length. This file is the authoritative truth input for the evaluation scripts below.
+
+```bash
+python3 02_alignment_simulated/readSimulator_truth_1M.py -h
+```
+
+### 5.2 `compare_aligners.py`: compare several BAMs against the same truth
+
+Use this script to reproduce the manuscript comparison of BOTAS with other aligners. The same truth table is applied to every BAM, and metrics are reported separately for `ALL`, `JUNCTION`, and `NON_JUNCTION` reads.
+
+```bash
+python3 02_alignment_simulated/compare_aligners.py \
+    --truth work/simulated/E_coli_K12/reference_truth.tsv \
+    --bam BOTAS work/bams/E_coli_K12.botas.sorted.bam \
+    --bam Bowtie2 work/bams/E_coli_K12.bowtie2.sorted.bam \
+    --bam BWA-MEM2 work/bams/E_coli_K12.bwa_mem2.sorted.bam \
+    --bam minimap2 work/bams/E_coli_K12.minimap2.sorted.bam \
+    --tolerance 10 \
+    --tsv work/results/E_coli_K12_alignment_metrics.tsv
+```
+
+Each `--bam` takes two values: a label and a BAM path. Repeat the option for as many aligners as required.
+
+A mapped mate is counted as correct only when its reference sequence and strand match truth and its reported 1-based start coordinate lies within `--tolerance` bp of the true start. The manuscript uses 10 bp.
+
+The categories are defined from simulation truth:
+
+- `ALL`: every simulated mate;
+- `JUNCTION`: truth-labelled origin-spanning mates;
+- `NON_JUNCTION`: all remaining truth-labelled mates.
+
+`XC:Z:JUNCTION` is not used to decide whether a simulated read belongs to the junction category. If present, the number of such tags is reported separately as a BOTAS diagnostic.
+
+The optional `--tsv` output contains `aligner`, `category`, `total`, `correct`, `wrong`, `unmapped`, `precision`, `recall`, `f1`, and `junction_tags`.
+
+```bash
+python3 02_alignment_simulated/compare_aligners.py -h
+```
+
+### 5.3 `evaluate_pe_bam.py`: evaluate one BAM independently
+
+Use `evaluate_pe_bam.py` for single-BAM validation and debugging. Unlike `compare_aligners.py`, it accepts truth supplied as SAM or BAM in addition to the BOTAS simulator TSV.
+
+```bash
+python3 02_alignment_simulated/evaluate_pe_bam.py \
+    --bam work/bams/E_coli_K12.botas.sorted.bam \
+    --truth work/simulated/E_coli_K12/reference_truth.tsv \
+    --out work/results/E_coli_K12_botas_evaluation.tsv \
     --tolerance 10
 ```
 
----
-
-# 5. Single-end alignment evaluation
-
-Single-end alignments are evaluated using:
+Supported truth inputs are:
 
 ```text
-botas_manuscript_scripts/evaluate_se_bam.py
+.tsv   BOTAS truth table produced by readSimulator_truth_1M.py
+.sam   SAM containing the known paired-end alignments
+.bam   BAM containing the known paired-end alignments
 ```
 
-Example:
+Important arguments:
+
+| Argument | Meaning |
+|---|---|
+| `--bam` | BAM being evaluated |
+| `--truth` | Truth TSV, SAM or BAM |
+| `--out` | Output metrics TSV |
+| `--tolerance` | Maximum permitted start-coordinate deviation in bp; default 10 |
+
+The output contains counts of correct, wrong and unmapped reads together with precision, recall and F1. A summary is also printed to the terminal.
+
+Use `compare_aligners.py` when several aligners should be compared in one command with separate junction/non-junction summaries. Use `evaluate_pe_bam.py` for single-BAM validation.
 
 ```bash
-python botas_manuscript_scripts/evaluate_se_bam.py \
-    --bam <alignment.bam> \
-    --truth botas_manuscript_data/simulated/standard_se/rphaseoli/rphaseoli_se_truth.tsv \
-    --out <metrics.tsv> \
-    --tolerance 10
+python3 02_alignment_simulated/evaluate_pe_bam.py -h
 ```
 
-The supplied single-end truth tables use 0-based genomic coordinates, corresponding directly to `pysam.AlignmentSegment.reference_start`.
+## 6. Table 3: experimental alignment benchmark
 
----
-
-# 6. Standard paired-end alignment benchmarks
-
-## E. coli
-
-Run:
+Run all four aligners on any samples defined in `samples.tsv`:
 
 ```bash
-./botas_manuscript_scripts/run_final_ecoli_standard_pe_updated.sh
+python3 03_alignment_experimental/run_4_aligners.py \
+    --manifest work/samples.tsv \
+    --outdir work/alignment_experimental \
+    --threads 24 \
+    --circular all \
+    --botas-overhang-percent 5
 ```
 
-The workflow compares:
-
-- BOTAS
-- Bowtie2
-- BWA-MEM2
-- Minimap2
-- HISAT2
-- STAR
-
-using the same simulated paired-end dataset.
-
-The summary is written to:
+The script writes:
 
 ```text
-results/tables/ecoli_standard_pe_summary.tsv
+work/alignment_experimental/alignment_benchmark_summary.tsv
 ```
 
-## R. phaseoli
+This file gives the BAM path for every sample/aligner combination.
 
-Run:
+### 6.1 Create a BOTAS BAM manifest
 
 ```bash
-./botas_manuscript_scripts/run_final_rphaseoli_standard_pe.sh
+python3 00_setup/select_bams.py \
+    --samples work/samples.tsv \
+    --alignment-summary work/alignment_experimental/alignment_benchmark_summary.tsv \
+    --aligner BOTAS \
+    --output work/botas_bams.tsv
 ```
 
-The corresponding summary is written to:
-
-```text
-results/tables/rphaseoli_standard_pe_summary.tsv
-```
-
-For each aligner, the scripts record runtime, peak RAM, precision, recall, and F1 score.
-
----
-
-# 7. Circular-boundary paired-end benchmarks
-
-Circular-wrap datasets test the ability of an aligner to recover reads originating from fragments spanning the end/origin boundary of circular bacterial replicons.
-
-## E. coli
-
-Run:
+### 6.2 Count experimental circular-junction fragments
 
 ```bash
-./botas_manuscript_scripts/run_final_ecoli_circular_pe.sh
+python3 03_alignment_experimental/count_junction_fragments.py \
+    --manifest work/botas_bams.tsv \
+    --output work/junction_fragment_summary.tsv \
+    --details work/junction_fragment_details.tsv \
+    --min-mapq 20
 ```
 
-## R. phaseoli
+The manuscript uses the unique fragment count carrying `XC:Z:JUNCTION`; the MAPQ-stratified field is diagnostic.
 
-Run:
+## 7. Table 4: gene quantification
+
+Use the BOTAS BAM manifest produced above:
 
 ```bash
-./botas_manuscript_scripts/run_final_rphaseoli_circular_pe.sh
+python3 04_quantification/run_quantification.py \
+    --manifest work/botas_bams.tsv \
+    --outdir work/quantification \
+    --threads 24 \
+    --feature-type gene \
+    --id-attribute locus_tag \
+    --min-overlap 1
 ```
 
-BOTAS is run with circular-genome handling enabled:
+This runs BOTAS quantify, featureCounts and HTSeq using the same BAM/GFF pairs.
+
+Summarize assignment counts:
 
 ```bash
-botas align --circular ...
+python3 04_quantification/summarize_quantification_all.py \
+    --manifest work/botas_bams.tsv \
+    --results-dir work/quantification \
+    --output work/quantification_tool_summary.tsv
 ```
 
-The other aligners are evaluated against the same reads and truth positions.
+## 8. Tables 5 and 6: operon inference
 
----
+### 8.1 Run BOTAS getOperons
 
-# 8. R. phaseoli circular truth-table conversion
-
-The raw *R. phaseoli* circular-wrap truth table stores simulated positions as 0-based coordinates:
-
-```text
-rphaseoli_wrap_truth.tsv
-```
-
-The paired-end evaluator uses the 1-based `start1_1` and `start1_2` convention used by the standard paired-end truth tables.
-
-The evaluation truth table is therefore generated with:
+The manuscript thresholds are supplied explicitly:
 
 ```bash
-python botas_manuscript_scripts/prepare_rphaseoli_circular_truth.py \
-    --input botas_manuscript_data/simulated/circular_wrap/rphaseoli/rphaseoli_wrap_truth.tsv \
-    --output botas_manuscript_data/simulated/circular_wrap/rphaseoli/rphaseoli_wrap_truth_eval.tsv
+python3 05_operons/run_botas_getoperons.py \
+    --manifest work/botas_bams.tsv \
+    --outdir work/botas_operons \
+    --threads 24 \
+    --gene-id gene \
+    --max-igd 70 \
+    --min-coverage 0.5 \
+    --min-cov-ratio 0.25 \
+    --min-score 0.0
 ```
 
-The resulting file is:
+The script writes `work/botas_operons/operon_outputs.tsv`, which maps each sample to its BOTAS operon TSV.
 
-```text
-botas_manuscript_data/simulated/circular_wrap/rphaseoli/rphaseoli_wrap_truth_eval.tsv
-```
+### 8.2 DBTBS curated truth set
 
-This conversion adds one nucleotide to the raw 0-based positions without otherwise changing the simulated truth information.
-
----
-
-# 9. R. phaseoli single-end benchmark
-
-Run:
+First scrape/export the DBTBS material using `scrape_dbtbs_operons.py` according to the source format used in the manuscript. The scraper itself exposes its options with:
 
 ```bash
-./botas_manuscript_scripts/run_final_rphaseoli_standard_se.sh
+python3 05_operons/scrape_dbtbs_operons.py -h
 ```
 
-The workflow compares BOTAS, Bowtie2, BWA-MEM2, Minimap2, HISAT2, and STAR.
-
-The BOTAS single-end benchmark uses:
-
-```text
---step 15
-```
-
-as used in the manuscript analysis.
-
----
-
-# 10. Circular-wrap simulation scripts
-
-Scripts used for generating *R. phaseoli* circular-boundary reads are provided under:
-
-```text
-botas_manuscript_scripts/
-```
-
-The single-end circular-wrap dataset can be generated using:
+Then apply the strict experimental-evidence filter:
 
 ```bash
-python botas_manuscript_scripts/simulate_rphaseoli_circular_wrap_se.py
+python3 05_operons/filter_dbtbs_strict.py \
+    --input dbtbs_operons_experimental.tsv \
+    --operons-out dbtbs_operons_strict.tsv \
+    --pairs-out dbtbs_operon_strict_truth_pairs.tsv
 ```
 
-The default simulation parameters are:
+### 8.3 RegulonDB curated truth set
 
-```text
-reads per replicon: 10,000
-read length:         150 bp
-random seed:         42
-```
-
-Every generated read is forced to cross the end/origin boundary of its source replicon.
-
-A paired-end circular simulation script is also supplied as:
-
-```text
-simulate_rphaseoli_circular_wrap.py
-```
-
-The archived simulated FASTQ and truth files used for the reported benchmark are supplied directly under `botas_manuscript_data/`.
-
----
-
-# 11. Gene quantification benchmark
-
-BOTAS gene-level quantification was compared with featureCounts using the same paired-end experimental *E. coli* alignment file and genome annotation.
-
-Run:
+After obtaining the RegulonDB `OperonSet` table, run:
 
 ```bash
-BAM=/path/to/ecoli.sorted.bam \
-GFF=references/ecoli/annotation.gff \
-THREADS=6 \
-./botas_manuscript_scripts/run_quantification_benchmark.sh
+python3 05_operons/make_regulondb_ecoli_truth.py \
+    --operonset /path/to/OperonSet.tsv \
+    --gff /path/to/E_coli_annotation.gff3 \
+    --operons-out regulondb_operons_clean.tsv \
+    --pairs-out regulondb_truth_pairs.tsv \
+    --unmapped-out regulondb_unmapped_members.tsv
 ```
 
-BOTAS is run using:
+No fixed E. coli path is embedded in the script.
+
+### 8.4 Prepare Rockhopper annotations
 
 ```bash
-botas quantify \
-    -b <BAM> \
-    -g <GFF> \
-    --gff-gene-attribute ID
+python3 05_operons/make_rockhopper_annotations.py \
+    --manifest work/samples.tsv \
+    --outdir work/rockhopper_references
 ```
 
-featureCounts is run in paired-fragment counting mode using:
-
-```text
--p --countReadPairs
-```
-
-Runtime and peak memory are measured for both programs.
-
-Outputs are written under:
-
-```text
-results/quantification/
-```
-
----
-
-# 12. BOTAS versus featureCounts agreement
-
-After running the quantification benchmark, calculate gene-level agreement using:
+Rockhopper requires its own reference/annotation representation. Build the Rockhopper run manifest automatically:
 
 ```bash
-python botas_manuscript_scripts/compare_botas_featurecounts.py
+python3 05_operons/build_rockhopper_manifest.py \
+    --samples work/samples.tsv \
+    --reference-dir work/rockhopper_references \
+    --output work/rockhopper_samples.tsv
 ```
 
-The script calculates:
-
-- number of genes compared;
-- number of genes with identical counts;
-- Pearson correlation;
-- Spearman correlation;
-- R²;
-- mean absolute error (MAE);
-- root mean squared error (RMSE); and
-- maximum absolute count difference.
-
-The default outputs are:
-
-```text
-results/quantification/botas_featurecounts_comparison.tsv
-results/quantification/botas_featurecounts_gene_counts.tsv
-```
-
-The second file contains the gene-by-gene BOTAS and featureCounts values underlying the reported statistics.
-
----
-
-# 13. Operon benchmark against RegulonDB
-
-BOTAS operon predictions were evaluated against experimentally curated transcription-unit information from RegulonDB.
-
-The benchmark consists of three stages.
-
-## 13.1 Extract RegulonDB transcription units
-
-Run:
+The resulting manifest has columns `sample`, `r1`, `r2`, and `rockhopper_reference`. Then run:
 
 ```bash
-python botas_manuscript_scripts/extract_regulondb_operon_links.py \
-    --bson /path/to/operonDatamart.bson
+python3 05_operons/run_rockhopper.py \
+    --manifest work/rockhopper_samples.tsv \
+    --outdir work/rockhopper \
+    --jar /path/to/Rockhopper.jar \
+    --threads 24 \
+    --java-mem 16g
 ```
 
-This produces:
+### 8.5 Curated comparison for Table 5
+
+Create a TSV with one row per curated organism and these columns:
 
 ```text
-results/operons/regulondb/
-├── regulondb_adjacent_gene_links.tsv
-└── regulondb_transcription_units.tsv
+sample    reference_name    gff    truth_pairs    botas_operons    rockhopper_operons
 ```
 
-Adjacent genes within each RegulonDB transcription unit are treated as reference operon links.
-
-The RegulonDB release used for the manuscript analysis should be matched to the version reported in the manuscript.
-
-## 13.2 Compare BOTAS with RegulonDB
-
-A gene-name-to-gene-ID mapping is required because RegulonDB gene names and the annotation identifiers used by BOTAS are not necessarily identical.
-
-The mapping file must contain:
-
-```text
-gene_name	gene_id
-```
-
-Run:
+Then run:
 
 ```bash
-python botas_manuscript_scripts/benchmark_operon_links_unordered.py \
-    --gene-map references/ecoli/regulondb_gene_map.tsv \
-    --regulondb-links results/operons/regulondb/regulondb_adjacent_gene_links.tsv \
-    --botas-operons results/operons/botas_operons.tsv
+python3 05_operons/make_table5_curated.py \
+    --manifest work/table5_inputs.tsv \
+    --output work/table5_curated_operon.tsv
 ```
 
-Gene-pair direction is ignored during comparison. Thus:
+The comparison is restricted to curated adjacent pairs whose genes are represented as protein-coding genes in the supplied annotation. Predictions absent from the curated database are reported as `predictions_not_represented`; they are not automatically treated as biological false positives.
+
+### 8.6 BOTAS–Rockhopper concordance for Table 6
+
+Create a TSV containing:
 
 ```text
-geneA-geneB
+sample    gff    botas_operons    rockhopper_operons
 ```
 
-and:
-
-```text
-geneB-geneA
-```
-
-are treated as the same adjacent-gene link. This prevents reverse-strand transcription units from being penalized solely because their genes are represented in the opposite order.
-
-The benchmark reports:
-
-- mapped reference links;
-- predicted links;
-- true positives;
-- false positives;
-- false negatives;
-- unmapped reference links;
-- precision;
-- recall; and
-- F1 score.
-
-Detailed TP, FP, and FN link tables are also retained.
-
-## 13.3 Plot the operon benchmark
-
-Run:
+Then run:
 
 ```bash
-python botas_manuscript_scripts/plot_operon_benchmark.py
+python3 05_operons/compare_botas_rockhopper_all.py \
+    --manifest work/table6_inputs.tsv \
+    --output work/botas_rockhopper_concordance.tsv
 ```
 
-Figures are written to:
+The script compares adjacent protein-coding gene pairs while preserving original adjacency; it does not reconnect genes across intervening non-protein-coding features.
+
+## 9. Running one sample instead of the complete manuscript panel
+
+The scripts do not require seven organisms. Make a manifest containing a single row and run exactly the same commands. For example:
 
 ```text
-results/operons/figures/
+sample    r1    r2    reference    gff
+my_sample /data/R1.fastq.gz /data/R2.fastq.gz /data/genome.fna /data/genome.gff3
 ```
 
-in both PNG and PDF formats.
+This is also the recommended way to test the workflow before launching all manuscript datasets.
 
----
+## 10. Re-running and output safety
 
-# 14. Experimental RNA-seq data
+Most batch runners skip outputs that already exist. Use `--force` where available when a benchmark parameter, BOTAS version, reference, or input FASTQ has changed. Do not combine outputs from runs produced with different parameters.
 
-Raw experimental RNA-seq reads are not redistributed in this archive because they are publicly available from the Sequence Read Archive.
+For publication reproduction, keep the following with the final output archive:
 
-The manuscript analyses include experimental datasets for *E. coli* and *R. phaseoli*. Their SRA accession numbers and reference genome accessions are provided in the manuscript.
+- `software_versions.txt`
+- the manifests actually used
+- `work/references/references.tsv` and checksum fields
+- benchmark result TSVs
+- the exact BOTAS version/commit or package version
 
-Users should retrieve the original reads directly from the corresponding public repository before reproducing the experimental-data analyses.
+## 11. Checking script interfaces
 
----
+Every Python executable provides command-line help:
 
-# 15. Output directories
-
-The supplied workflows create results under:
-
-```text
-results/
-├── alignment/
-├── metrics/
-├── tables/
-├── quantification/
-├── experimental/
-└── operons/
+```bash
+python3 path/to/script.py -h
 ```
 
-Large intermediate BAM files and aligner indices do not need to be archived because they can be regenerated from the supplied data and reference sequences.
+The two shell drivers provide:
 
----
+```bash
+bash 01_rrna/build_rrna_benchmark.sh --help
+bash 02_alignment_simulated/run_all_alignment_benchmarks.sh --help
+```
 
-# 16. Reproducibility notes
-
-The simulated FASTQ files and truth tables used for the manuscript benchmarks are included directly in this archive.
-
-Random seeds are fixed where applicable.
-
-Alignment accuracy is evaluated against known simulated genomic positions rather than inferred from alignment statistics alone.
-
-Runtime and peak-memory measurements use GNU `/usr/bin/time`.
-
-Benchmark scripts accept the `THREADS` environment variable where appropriate.
-
-Reference genomes, external databases, and publicly archived experimental RNA-seq datasets should be obtained from their original repositories using the accessions and versions reported in the manuscript.
-
----
-
-# 17. Citation
-
-If you use these supplementary benchmarking materials, please cite the associated BOTAS manuscript and the archived Zenodo dataset.
-
-Wekesa, C., Kelvin, K., Muoma, J., & Mithöfer, A. (2026). *BOTAS: Supplementary Benchmarking Data and Scripts for Bacterial RNA-seq Analysis* (Version 1.0) [Dataset]. Zenodo. https://doi.org/10.5281/zenodo.22101516
-
-The BOTAS manuscript will also be cited once its publication details are available.
-
----
-
-# 18. License
-
-The supplementary benchmarking data and scripts in this archive are released under the Creative Commons Attribution 4.0 International (CC BY 4.0) license.
-
-Copyright © 2026 Clabe Wekesa.
-
-Under the CC BY 4.0 license, these materials may be shared and adapted provided appropriate credit is given to the creator(s), a link to the license is provided, and any changes are indicated.
-
-License: https://creativecommons.org/licenses/by/4.0/
-
-Zenodo DOI: https://doi.org/10.5281/zenodo.22101516
-
----
+The key design rule of this package is that **file locations and sample identities live in manifests or command-line arguments, not inside the analysis code**.

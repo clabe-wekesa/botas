@@ -1,0 +1,2 @@
+sample	bam	gff	reference
+sampleA	/path/to/sampleA.sorted.bam	/path/to/sampleA.gff3	/path/to/sampleA.fna

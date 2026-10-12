@@ -1,0 +1,2 @@
+sample	reference_name	gff	truth_pairs	botas_operons	rockhopper_operons
+sampleA	CuratedDatabase	/path/to/sampleA.gff3	/path/to/truth_pairs.tsv	/path/to/botas_operons.tsv	/path/to/_operons.txt

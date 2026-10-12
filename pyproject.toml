@@ -8,8 +8,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "botas-rnaseq"
-version = "0.1.6"
-description = "BOTAS: Bacterial Operon-aware Transcriptome Alignment System"
+version = "0.1.7"
+description = "BOTAS: Bacterial Operon-aware Transcriptome Alignment Suite"
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
